@@ -1,0 +1,9 @@
+data/
+.venv/
+__pycache__/
+.ruff_cache/
+.pytest_cache/
+*.duckdb
+
+.claude/settings.local.json
+.vscode/
