@@ -6,6 +6,7 @@ Uso: uv run python executar.py
 
 from pipeline.cobertura import main as cobertura
 from pipeline.db import CAMINHO_BANCO
+from pipeline.gold import main as gold
 from pipeline.ingestao import main as ingestao
 from pipeline.ingestao_ibge import main as ingestao_ibge
 from pipeline.transformacao import main as transformacao
@@ -38,7 +39,9 @@ def main():
     print()
     cobertura()
 
-    # --- gold entra nas próximas etapas ---
+    # --- gold (spec-gold.md §4): 6º passo, após a cobertura ---
+    print()
+    gold()
 
 
 if __name__ == "__main__":

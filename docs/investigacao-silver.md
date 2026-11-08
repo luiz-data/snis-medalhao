@@ -1263,6 +1263,57 @@ Mart 3 deve usar a **fórmula completa do IN049**, não a simplificada.
 
 ---
 
+## D25 — IN022 (consumo per capita do mart 3)
+
+A silver tem a coluna **publicada** do IN022: `indice_consumo_agua_per_capita`
+(L/hab·dia). Comparei-a **linha a linha**, 2010–2021, com variantes calculadas a
+partir das colunas reais (`duckdb_columns()`): AG010 = `volume_agua_consumido`,
+AG019 = `volume_agua_tratada_exportado`, população = `populacao_atendida_agua`
+(não há `populacao_total` na silver SNIS; o total é do IBGE-POP).
+
+**Tabela de variantes** (% de linhas com diferença relativa < 0,5%):
+
+| Variante | Numerador / denominador | % < 0,5% | mediana | p95 | nacional 2021 |
+|---|---|---|---|---|---|
+| (a) ficha original | AG010 / pop do ano | 35,1% | 0,95% | 15,2% | **183,1** |
+| (b) | (AG010 − AG019) / pop do ano | 36,3% | 0,88% | 10,4% | — |
+| (cA) | AG010 / média(pop_ano, pop_ano−1) | 94,5% | 0,02% | 1,35% | — |
+| **(cB)** | **(AG010 − AG019) / média(pop_ano, pop_ano−1)** | **98,3%** | **0,019%** | **0,053%** | **151,3** |
+| **(cB) com lag corrigido** | idem, mas a média só usa `pop` de **ano − 1 exato** | **99,95%** | 0,019% | 0,053% | **151,3** |
+
+**Correção do lag:** `lag(pop) OVER (PARTITION BY id_municipio ORDER BY ano)`
+pega a **linha anterior** do município, que nem sempre é `ano − 1` (há buracos na
+série). Restringindo o valor do lag a `lag(ano) = ano − 1` (fallback
+`pop_med = pop` quando não há ano anterior), **34–157 linhas/ano** mudam e a
+coincidência com o publicado sobe de **98,3% para 99,95%**; o nacional de 2021
+praticamente não muda (151,32 → 151,30).
+
+**Decisão (D25, APROVADA em 2026-11-08):** adotar a variante **(cB) com lag
+corrigido** — passa a regra dos 95% (99,95% < 0,5%) e bate com a referência
+nacional ~152 L/hab·dia. A coluna mantém o nome `consumo_per_capita` (compatível
+com o IN022).
+
+**Consumo líquido negativo** (`AG010 − AG019 < 0`, 2010–2021): **4 linhas**
+(2014: 1; 2018: 2; 2020: 1) — município que exporta mais água tratada do que
+consome. Imaterial → **exposto como diagnóstico** (`linhas_consumo_liquido_negativo`),
+**sem exclusão**, dado preservado.
+
+**Semântica de `populacao_atendida_agua` (confirmada):** é a **população total
+atendida (urbana + rural)**, não só urbana. Evidência em 2021:
+
+| Comparação | Resultado |
+|---|---|
+| atendida > `populacao_urbana` | 3.021 de 5.312 linhas (57%) |
+| razão mediana atendida / urbana | **1,026** |
+| atendida > `populacao_total_ibge` | 11 de 5.312 (revisões de série) |
+| razão mediana atendida / total IBGE | **0,757** (≈ 76% do total) |
+
+Ou seja, a atendida está **acima da urbana** e **abaixo do total IBGE** (≈76% do
+total na mediana) → é a população total servida pelo prestador, não o recorte
+urbano.
+
+---
+
 ## D4 — Sedes de prestador regional
 
 R3.4: a distorção é **concentração no município-sede**, não duplicação (só 3

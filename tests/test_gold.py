@@ -61,9 +61,12 @@ def _tabelas_gold(banco):
 def _schema_gold_existe(banco):
     con = _ro(banco)
     try:
-        return con.execute(
-            "SELECT count(*) FROM duckdb_schemas() WHERE schema_name = 'gold'"
-        ).fetchone()[0] > 0
+        return (
+            con.execute(
+                "SELECT count(*) FROM duckdb_schemas() WHERE schema_name = 'gold'"
+            ).fetchone()[0]
+            > 0
+        )
     finally:
         con.close()
 
@@ -227,8 +230,18 @@ M1_COB_AGUA_BR_2021_MIN = 93.2
 M1_COB_AGUA_BR_2021_MAX = 93.5
 # Exclusões A2 de água por ano (D5), confirmadas no SELECT.
 M1_EXCL_AGUA_POR_ANO = {
-    2010: 26, 2011: 35, 2012: 22, 2013: 3, 2014: 3, 2015: 1,
-    2016: 43, 2017: 7, 2018: 1, 2019: 7, 2020: 6, 2021: 18,
+    2010: 26,
+    2011: 35,
+    2012: 22,
+    2013: 3,
+    2014: 3,
+    2015: 1,
+    2016: 43,
+    2017: 7,
+    2018: 1,
+    2019: 7,
+    2020: 6,
+    2021: 18,
 }
 
 
@@ -504,3 +517,186 @@ def test_m2_indices_faixa(gold_db):
     assert negativos == 0
     assert trat_acima_sem_motivo == 0
     assert coleta_acima_robusta == 0
+
+
+# ---------------------------------------------------------------------------
+# Mart 3 — gold.perdas_consumo_uf_ano (spec-gold.md §2, D3/D25)
+# ---------------------------------------------------------------------------
+
+M3 = "gold.perdas_consumo_uf_ano"
+
+# Expectativas confirmadas no MCP/SELECT (2026-11-08).
+M3_LINHAS = 754  # 27×28 = 756 menos 2 pares ausentes em anos iniciais
+M3_PERDA_MAX = 94.48  # máximo observado de indice_perdas_in049
+M3_PC_NAC_2021_MIN = 150.0  # consumo per capita nacional 2021 (IN022, D25) ≈ 151,3
+M3_PC_NAC_2021_MAX = 153.0
+M3_EXTREMO_MUN = "1100114"  # Vilhena/RO
+M3_EXTREMO_ANO = 1997  # único per capita absurdo, preservado sem correção
+
+
+def test_m3_linhas_e_pk(gold_db):
+    """754 linhas; PK (ano, sigla_uf) única; dimensões DTB não nulas."""
+    con = _ro(gold_db)
+    try:
+        linhas = con.execute(f"SELECT count(*) FROM {M3}").fetchone()[0]
+        dup = con.execute(
+            f"SELECT count(*) FROM (SELECT 1 FROM {M3} "
+            "GROUP BY ano, sigla_uf HAVING count(*) > 1)"
+        ).fetchone()[0]
+        nulos = con.execute(
+            f"SELECT count(*) FROM {M3} "
+            "WHERE sigla_uf IS NULL OR nome_uf IS NULL OR nome_regiao IS NULL"
+        ).fetchone()[0]
+    finally:
+        con.close()
+    assert linhas == M3_LINHAS
+    assert dup == 0 and nulos == 0
+
+
+def test_m3_perdas_faixa(gold_db):
+    """indice_perdas_in049 ∈ [0, 100] (D3, soma sobre soma sem inconsistentes)."""
+    con = _ro(gold_db)
+    try:
+        fora = con.execute(
+            f"SELECT count(*) FROM {M3} WHERE indice_perdas_in049 NOT BETWEEN 0 AND 100"
+        ).fetchone()[0]
+        maxp = con.execute(f"SELECT max(indice_perdas_in049) FROM {M3}").fetchone()[0]
+    finally:
+        con.close()
+    assert fora == 0
+    assert maxp == pytest.approx(M3_PERDA_MAX, abs=0.01)
+
+
+def test_m3_identidade_informantes_inconsistentes(gold_db):
+    """D3: informantes_perdas + inconsistentes = municípios com AG006 e AG010 não nulos."""
+    con = _ro(gold_db)
+    try:
+        divergentes = con.execute(
+            """
+            WITH esperado AS (
+              SELECT s.ano, d.sigla_uf,
+                count(*) FILTER (WHERE s.volume_agua_produzido IS NOT NULL
+                   AND s.volume_agua_consumido IS NOT NULL) AS perdas_nao_nula
+              FROM silver.municipio_agua_esgoto s
+              JOIN silver.ibge_dtb_municipio d ON d.id_municipio = s.id_municipio
+              GROUP BY s.ano, d.sigla_uf
+            )
+            SELECT count(*) FROM gold.perdas_consumo_uf_ano m
+            JOIN esperado e ON e.ano = m.ano AND e.sigla_uf = m.sigla_uf
+            WHERE m.municipios_informantes_perdas + m.linhas_inconsistentes_in049
+                  <> e.perdas_nao_nula
+            """
+        ).fetchone()[0]
+    finally:
+        con.close()
+    assert divergentes == 0
+
+
+def test_m3_componentes_somam_inconsistentes(gold_db):
+    """D3: excluidas_den_nao_positivo + excluidas_consumo_acima = linhas_inconsistentes_in049."""
+    con = _ro(gold_db)
+    try:
+        incoerentes = con.execute(
+            f"SELECT count(*) FROM {M3} WHERE "
+            "excluidas_den_nao_positivo + excluidas_consumo_acima "
+            "<> linhas_inconsistentes_in049"
+        ).fetchone()[0]
+    finally:
+        con.close()
+    assert incoerentes == 0
+
+
+def test_m3_consumo_per_capita_nacional_2021(gold_db):
+    """IN022 (D25): consumo per capita nacional 2021 ∈ [150, 153] L/hab·dia.
+
+    Reconstruído da silver (soma sobre soma) com a fórmula cB: (AG010 − AG019)
+    sobre a média da população atendida do ano e do ano anterior exato.
+    """
+    con = _ro(gold_db)
+    try:
+        pc = con.execute(
+            """
+            WITH s AS (
+              SELECT ano, volume_agua_consumido AS ag010,
+                coalesce(volume_agua_tratada_exportado, 0) AS ag019,
+                populacao_atendida_agua AS pop,
+                lag(populacao_atendida_agua) OVER (
+                  PARTITION BY id_municipio ORDER BY ano) AS lag_pop,
+                lag(ano) OVER (PARTITION BY id_municipio ORDER BY ano) AS lag_ano
+              FROM silver.municipio_agua_esgoto
+            )
+            SELECT sum((ag010 - ag019) * 1000000.0)
+                   / nullif(sum(((pop + coalesce(
+                        CASE WHEN lag_ano = ano - 1 THEN lag_pop END, pop)) / 2.0)
+                        * 365.0), 0)
+            FROM s
+            WHERE ano = 2021 AND ag010 IS NOT NULL AND pop > 0
+            """
+        ).fetchone()[0]
+    finally:
+        con.close()
+    assert M3_PC_NAC_2021_MIN <= pc <= M3_PC_NAC_2021_MAX
+
+
+def test_m3_lag_usa_ano_anterior_exato(gold_db):
+    """D25: a média de população ignora o lag quando não é o ano-1 exato.
+
+    Monta um município sintético com um buraco na série (2015 ausente): a média
+    de 2016 tem de cair no fallback (= pop de 2016), não usar a pop de 2014.
+    """
+    con = duckdb.connect(":memory:")
+    try:
+        con.execute(
+            """
+            CREATE TABLE s(id_municipio VARCHAR, ano INT, pop INT);
+            INSERT INTO s VALUES ('X', 2014, 1000), ('X', 2016, 3000);
+            """
+        )
+        pop_med_2016 = con.execute(
+            """
+            WITH m AS (
+              SELECT ano, pop,
+                lag(pop) OVER (PARTITION BY id_municipio ORDER BY ano) AS lag_pop,
+                lag(ano) OVER (PARTITION BY id_municipio ORDER BY ano) AS lag_ano
+              FROM s
+            )
+            SELECT (pop + coalesce(
+                      CASE WHEN lag_ano = ano - 1 THEN lag_pop END, pop)) / 2.0
+            FROM m WHERE ano = 2016
+            """
+        ).fetchone()[0]
+    finally:
+        con.close()
+    # 2014 não é 2015; fallback -> média = pop de 2016 (3000), não (1000+3000)/2.
+    assert pop_med_2016 == 3000.0
+
+
+def test_m3_extremo_vilhena_1997_preservado(gold_db):
+    """D25: Vilhena/RO 1997 é o único per capita absurdo, preservado sem correção.
+
+    O erro de escala no bruto (volume_agua_consumido) permanece na silver e
+    domina o per capita de RO em 1997 (> 1.000 L/hab·dia), fora da janela robusta.
+    """
+    con = _ro(gold_db)
+    try:
+        # o município extremo segue na silver, intacto (consumo >> população)
+        consumo, pop = con.execute(
+            "SELECT volume_agua_consumido, populacao_atendida_agua "
+            "FROM silver.municipio_agua_esgoto "
+            f"WHERE id_municipio = '{M3_EXTREMO_MUN}' AND ano = {M3_EXTREMO_ANO}"
+        ).fetchone()
+        # per capita de RO em 1997 é absurdo (> 1.000 L/hab·dia) por causa dele
+        pc_ro_1997 = con.execute(
+            f"SELECT consumo_per_capita FROM {M3} "
+            f"WHERE ano = {M3_EXTREMO_ANO} AND sigla_uf = 'RO'"
+        ).fetchone()[0]
+        # e esse é o único grão com per capita absurdo em todo o mart
+        absurdos = con.execute(
+            f"SELECT count(*) FROM {M3} "
+            "WHERE consumo_per_capita > 1000 OR consumo_per_capita < 20"
+        ).fetchone()[0]
+    finally:
+        con.close()
+    assert consumo is not None and pop is not None and consumo > pop
+    assert pc_ro_1997 > 1000
+    assert absurdos == 1

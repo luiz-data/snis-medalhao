@@ -274,28 +274,58 @@ dado) e **isolados por `serie_robusta = false`** (ambos < 2006).
 | `ano` | INTEGER | 1995–2022 | — |
 | `sigla_uf`, `nome_uf`, `nome_regiao` | VARCHAR | dimensão territorial (DTB) | — |
 | `indice_perdas_in049` | DECIMAL | fórmula completa do IN049 (abaixo) | % |
-| `consumo_per_capita` | DECIMAL | `Σvolume_agua_consumido × 1000 / nullif(Σpopulacao_atendida_agua × 365, 0)` | L/hab·dia |
-| `municipios_informantes_perdas` | INTEGER | municípios com AG006 e AG010 não nulos | contagem |
-| `municipios_informantes_consumo` | INTEGER | municípios com volume consumido e pop. atendida não nulos | contagem |
-| `linhas_inconsistentes_in049` | INTEGER | municípios excluídos pela salvaguarda (D3), por grão | contagem |
+| `consumo_per_capita` | DECIMAL | **IN022 (D25):** `Σ(volume_agua_consumido − volume_agua_tratada_exportado) × 1.000.000 / nullif(Σ(pop_med × 365), 0)`, com `pop_med` = média da `populacao_atendida_agua` do ano e do ano anterior | L/hab·dia |
+| `municipios_informantes_perdas` | INTEGER | municípios que **entram no cálculo** de perdas: AG006 e AG010 não nulos **e não inconsistentes** (D3; alinha com a identidade do mart 1, ver nota) | contagem |
+| `municipios_informantes_consumo` | INTEGER | municípios com volume consumido e pop. atendida não nulos **e pop > 0** | contagem |
+| `linhas_inconsistentes_in049` | INTEGER | municípios excluídos pela salvaguarda (D3), por grão = `excluidas_den_nao_positivo + excluidas_consumo_acima` | contagem |
+| `excluidas_den_nao_positivo` | INTEGER | componente da salvaguarda (D3): `(AG006+AG018−AG024) ≤ 0` (com AG006 e AG010 não nulos) | contagem |
+| `excluidas_consumo_acima` | INTEGER | componente da salvaguarda (D3): denominador > 0 mas `AG010 > (AG006+AG018−AG024)` | contagem |
+| `linhas_consumo_liquido_negativo` | INTEGER | **diagnóstico (D25):** `volume_agua_consumido − volume_agua_tratada_exportado < 0`, **NÃO excluído** | contagem |
 
 - **Fórmula D3 (IN049 completo, glossário SNIS 2022):**
   `Σ(AG006 + AG018 − AG010 − AG024) / nullif(Σ(AG006 + AG018 − AG024), 0) × 100`,
   com `AG006 = volume_agua_produzido`, `AG018 = volume_agua_tratada_importado`,
   `AG010 = volume_agua_consumido`, `AG024 = volume_servico_agua`. **AG018 e AG024
   majoritariamente nulos → `coalesce(…, 0)`**; exigir **AG006 e AG010 não nulos**.
-- **Salvaguarda D3 (exclusão com flag):** excluir as linhas **inconsistentes**
-  `(AG006 + AG018 − AG024) < AG010` e contá-las por grão em
-  `linhas_inconsistentes_in049`. Impacto ≤ 0,15 pp no nacional, **0 UFs** mudam
-  > 5 pp (Verificação D3 revisada) — é **só salvaguarda**, não a regra decisiva.
+- **Salvaguarda D3 (exclusão com flag), em dois componentes:** excluir do cálculo
+  as linhas com **`(AG006 + AG018 − AG024) ≤ 0`** (`excluidas_den_nao_positivo`)
+  **ou** `AG010 > (AG006 + AG018 − AG024)` com denominador > 0
+  (`excluidas_consumo_acima`); a soma dos dois = `linhas_inconsistentes_in049`.
+  Impacto ≤ 0,15 pp no nacional, **0 UFs** mudam > 5 pp (Verificação D3 revisada)
+  — é **só salvaguarda**, não a regra decisiva. `excluidas_consumo_acima` por ano
+  na janela = **0–57** (Verificação D3).
+- **Consumo per capita = IN022 (D25):** `Σ(volume_agua_consumido −
+  volume_agua_tratada_exportado) × 1.000.000 / nullif(Σ(pop_med × 365), 0)`.
+  **`pop_med` = média da `populacao_atendida_agua` do ano e do ano imediatamente
+  anterior** (`(pop + coalesce(pop_ano−1, pop)) / 2`; sem ano anterior →
+  `pop_med = pop`). **Unidade:** o volume vem em **1.000 m³/ano**, então
+  **× 1.000.000** (L) **÷ 365** (dias) = L/hab·dia — comentário explícito no SQL.
+  Verificado linha a linha contra a coluna publicada `indice_consumo_agua_per_capita`:
+  **99,95%** das linhas com diff < 0,5% (ver D25 em
+  [`investigacao-silver.md`](investigacao-silver.md)). A fórmula ingênua `AG010 /
+  pop do ano` dava 183 L/hab·dia (≠ IN022); a variante cB dá **151,3** (2021).
 - **Denominador:** perdas → volume disponibilizado SNIS; consumo → população
-  atendida SNIS (`populacao_atendida_agua`, **não** IBGE).
+  atendida SNIS (`populacao_atendida_agua` = **total atendida, urbana+rural**,
+  D25; **não** IBGE).
+- **Nota (`municipios_informantes_perdas`):** conta os municípios que **entram no
+  cálculo** (não nulos **e** consistentes), para fechar a identidade
+  `municipios_informantes_perdas + linhas_inconsistentes_in049 = municípios com
+  AG006 e AG010 não nulos` (padrão do mart 1). Difere da redação literal "AG006 e
+  AG010 não nulos" por descontar as inconsistentes — proposital.
 - **Anos:** 1995–2022 (robusto ≥ 2001).
 - **Fontes:** SNIS; **IBGE-DTB**.
-- **Aceite:** até **27 UFs × 28 anos = 756 linhas** (menos nos anos iniciais, que
-  não têm todas as UFs; **chute a confirmar** via SELECT). Índice nacional
-  ponderado 2010–2021 ≈ **36–39%** (nível oficial ~40%, Verificação D3): sanidade
-  obrigatória. Inconsistentes por ano na janela: **0–57** (Verificação D3).
+- **Diagnóstico de extremos (D25):** `linhas_consumo_liquido_negativo` conta
+  `volume_agua_consumido − volume_agua_tratada_exportado < 0` (**4 linhas** em
+  2010–2021, imaterial), **sem exclusão**. **Vilhena/RO 1997** é o único per
+  capita absurdo (~46.760 L/hab·dia: `volume_agua_consumido` com erro de escala no
+  bruto, ano pré-robusto) — **preservado sem correção, documentado**.
+- **Aceite (confirmado no SELECT, 2026-11-08):** **754 linhas** (27 UFs × 28 anos
+  = 756, menos **2** pares ausentes em anos iniciais); PK `(ano, sigla_uf)` sem
+  duplicatas; dimensões DTB não nulas. `indice_perdas_in049` ∈ **[0; 94,48]**
+  (0 fora de [0,100]); índice nacional ponderado 2010–2021 = **37,42%** (nível
+  oficial ~40% ✓). `consumo_per_capita` nacional **2021 ≈ 151,3 L/hab·dia** (IN022
+  ~152 ✓). Identidade informantes+inconsistentes verificada nos 12 anos;
+  componentes somam as inconsistentes. Único extremo: Vilhena/RO 1997.
 
 ---
 
@@ -759,9 +789,10 @@ fixo, dois anos, window function e exclusão A2. Roteiro do que perguntar ao MCP
 - **IN049 / "volume disponibilizado":** a spec usa a fórmula completa confirmada
   no glossário 2022 (D3). Se algum código (AG006/AG018/AG010/AG024) divergir ao
   escrever o SQL, **reabrir D3** (não resolver sozinho).
-- **Semântica das colunas de população do SNIS** (`populacao_atendida_agua` é
-  total ou urbano+rural?) — hipótese não confirmada no dicionário; afeta a
-  interpretação dos marts 6 e 7.
+- ~~**Semântica das colunas de população do SNIS**~~ — **RESOLVIDO (D25):**
+  `populacao_atendida_agua` é **total atendida (urbana + rural)** — acima da
+  `populacao_urbana` (razão mediana 1,026) e ≈ 76% da `populacao_total_ibge`
+  (razão mediana 0,757) em 2021. Afeta a leitura dos marts 3, 6 e 7.
 - **Investimento e receita** (prestador vs. município vs. estado; direta vs.
   indireta) — semântica fina a confirmar para os marts 5 e 8.
 - **Classificação percentual × taxa** dos `indice_*` — quais têm teto 100.
@@ -808,7 +839,7 @@ D3, isso é um **conflito a listar** (reabrir D3), não a resolver aqui.
 |---|---|
 | 1 | ~~soma de `municipios_informantes_agua` (≈5.302 em 2021)~~ **CONFIRMADO: 5.284 em 2021 (5.302 − 18 A2); 324 linhas; água BR 2021 = 93,33%** |
 | 2 | ~~perfil de `municipios_informantes` por ano~~ **CONFIRMADO: 28 linhas × 13 colunas; coleta 20→3.051, tratamento 19→2.897 (universo comum); índice coleta 2021≈56%, tratamento 2021≈80,3%; painéis esgoto 1.473 (coleta)/1.440 (tratamento); `serie_robusta` true ≥ 2006** |
-| 3 | nº de linhas (≤ 756) e inconsistentes por ano (0–57) |
+| 3 | ~~nº de linhas e inconsistentes~~ **CONFIRMADO: 754 linhas (756 − 2 pares iniciais); perdas ∈ [0; 94,48]; índice nacional 2010–21 = 37,42%; consumo per capita 2021 = 151,3 L/hab·dia (IN022, D25); `excluidas_consumo_acima` 0–57/ano; único extremo Vilhena/RO 1997** |
 | 4 | nº de linhas = painel fixo único (4.472) menos A2 |
 | 5 | nº de linhas (≤ 756) nos anos iniciais |
 | 6 | perfil de cobertura por faixa |
