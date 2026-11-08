@@ -2,7 +2,7 @@
 
 | | |
 |---|---|
-| **Status** | rascunho para aprovação |
+| **Status** | aprovada e implementada |
 | **Versão** | 2 |
 | **Data** | 2026-11-08 |
 | **Responsável** | Luiz |
@@ -126,6 +126,7 @@ parcial** fique no banco.
 | B6 | `id_municipio` fora de **7 dígitos** (`^[0-9]{7}$`) | integridade de chave |
 | B7 | chave `(ano, id_municipio)` **nula ou repetida** | grão do contrato (ver §5) |
 | B8 | contagem de **linhas** ou de **colunas** diferente da bronze | espelho fiel em volume e largura |
+| B9 | valor **vazio (`''`) ou só com espaços** em qualquer coluna | a ingestão garante `NULL` para célula vazia; um `''` indica **quebra do contrato da ingestão**. Não se trata como `NULL` nem se usa `NULLIF`: para e mostra a coluna e a quantidade |
 
 > **Por que B4 vem antes do CAST:** `CAST('1,235' ...)` nem é o caso (o separador
 > é ponto), mas `CAST('10.239' AS DECIMAL(18,2))` devolve `10.24` **sem erro**.
@@ -263,6 +264,7 @@ UTF-8. Milhar separado por **ponto**. Duas partes:
 | Corrigir `populacao_atentida_esgoto` → `populacao_atendida_esgoto` | manter a grafia da fonte | é erro de digitação óbvio; a silver é a camada onde se corrige nome. Não colide com coluna existente |
 | Preservar anomalias | corrigir/filtrar na silver | separação de responsabilidades: a silver tipa fielmente, a gold trata. Corrigir aqui esconderia o dado bruto |
 | Verificar casas decimais **antes** do `CAST` | confiar no `CAST` | `CAST(... AS DECIMAL(_,2))` arredonda em silêncio; só a checagem prévia no texto detecta perda de precisão e falha de propósito |
+| Tratar `''`/só-espaços como **bloqueante** (B9) | tratar como `NULL` (via `NULLIF`) | a ingestão já garante `NULL` para célula vazia; aceitar `''` mascararia uma quebra do contrato da ingestão. Falhar expõe o problema na origem em vez de escondê-lo |
 
 ---
 
