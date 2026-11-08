@@ -4,9 +4,12 @@ Apaga o banco e roda todas as etapas do zero.
 Uso: uv run python executar.py
 """
 
+from pipeline.cobertura import main as cobertura
 from pipeline.db import CAMINHO_BANCO
 from pipeline.ingestao import main as ingestao
+from pipeline.ingestao_ibge import main as ingestao_ibge
 from pipeline.transformacao import main as transformacao
+from pipeline.transformacao_ibge import main as transformacao_ibge
 
 
 def main():
@@ -22,6 +25,18 @@ def main():
     # --- silver ---
     print()
     transformacao()
+
+    # --- IBGE bronze (spec-ibge.md §8) ---
+    print()
+    ingestao_ibge()
+
+    # --- IBGE silver ---
+    print()
+    transformacao_ibge()
+
+    # --- teste de cobertura de junção SNIS × IBGE (spec-ibge.md §7/§8) ---
+    print()
+    cobertura()
 
     # --- gold entra nas próximas etapas ---
 
