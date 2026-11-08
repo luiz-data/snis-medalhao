@@ -647,3 +647,789 @@ SELECT count(*) FROM T
   foi confirmada em documentação oficial.
 - Possível perda de precisão de `DOUBLE` em valores muito grandes não foi
   reavaliada nesta rodada.
+
+---
+---
+
+# Rodada 3
+
+Complemento sobre **`silver.municipio_agua_esgoto`** (`snis.duckdb`, MCP
+somente leitura). Objetivo: preparar a **spec da gold** (10 marts de
+[`indicadores.md`](indicadores.md)) e a **ingestão do IBGE**
+([`fontes-ibge.md`](fontes-ibge.md)). **Só fatos, sem decisões.** `TRY_CAST`
+não foi necessário (a silver já é tipada). Nomes de coluna conferidos em
+`duckdb_columns()`.
+
+### Nota sobre nomes reais de coluna (o que foi usado e por quê)
+
+| Pedido do enunciado | Coluna real usada na silver | Observação |
+|---|---|---|
+| população atendida de esgoto | `populacao_atendida_esgoto` | a silver **corrigiu** a grafia da bronze (`populacao_atentida_esgoto`) |
+| **população total** | **não existe na silver SNIS** | só virá do **IBGE-POP**; onde o item pedia "população total" usei `populacao_urbana` como **proxy de diagnóstico** e sinalizo |
+| volume de esgoto coletado / tratado | `volume_esgoto_coletado` / `volume_esgoto_tratado` | — |
+| receita operacional total | `receita_operacional` | há também `receita_operacional_direta`; "total" = `receita_operacional` |
+| despesa total | `despesa_total_servico` | — |
+| investimento total | `investimento_total_prestador` | há `_municipio` e `_estado`; o mart 5/8 usa o do **prestador** |
+
+---
+
+## R3.1 — Colunas 100% nulas por ano (marts 1 e 3; alerta da spec v2.1)
+
+Via `UNPIVOT ... INTO NAME/VALUE` + anti-join (o `UNPIVOT` do DuckDB **descarta
+nulos** por padrão, então colunas totalmente nulas num ano simplesmente não
+aparecem). **Anos de 2009 a 2021 não têm nenhuma coluna 100% nula.** Resumo:
+
+| Ano | Nº de colunas 100% nulas |
+|---|---|
+| 1995 | 64 |
+| 1996 | 63 |
+| 1997 | 66 |
+| 1998 | 46 |
+| 1999 | 37 |
+| 2000 | 35 |
+| 2001 | 29 |
+| 2002 | 27 |
+| 2003–2006 | 22 cada |
+| 2007–2008 | 18 cada |
+| **2009–2021** | **0** |
+| **2022** | **8** |
+
+- Até ~2008 os nulos estruturais são sobretudo **investimento municipal/estadual**,
+  **despesa de dívida/fiscal**, **exportação-importação de esgoto** e vários
+  **índices** — variáveis que o SNIS só passou a coletar depois.
+- **2022 (as 8 colunas 100% nulas):** `populacao_urbana`,
+  `populacao_urbana_residente_agua`, `populacao_urbana_atendida_agua`,
+  `populacao_urbana_residente_esgoto`, `populacao_urbana_atendida_esgoto`,
+  `indice_atendimento_urbano_agua`, `indice_atendimento_agua_esgoto`,
+  `indice_atendimento_esgoto_esgoto`.
+
+**Destaque população urbana 2022 + contraste com as variantes `_ibge`:** as
+colunas urbanas **autodeclaradas** zeram em 2022, mas as variantes **`_ibge`
+continuam preenchidas** — forte indício de que o SNIS substituiu a população
+urbana própria pela estimativa IBGE nesse ano:
+
+| Coluna | 2021 (não nulos) | 2022 (não nulos) |
+|---|---|---|
+| `populacao_urbana` | 5.313 | **0** |
+| `populacao_urbana_atendida_agua` | 5.302 | **0** |
+| `populacao_urbana_atendida_agua_ibge` | 5.312 | **5.425** |
+| `populacao_urbana_residente_esgoto` | 2.787 | **0** |
+| `populacao_urbana_residente_esgoto_ibge` | 2.787 | **2.902** |
+
+> Não há `populacao_urbana_ibge` (residente urbana total) — só existem as
+> variantes `_ibge` de *atendida água* e *residente esgoto*. Logo, mesmo usando
+> `_ibge`, falta em 2022 o **denominador de água** (`populacao_urbana`) do mart 1.
+
+**Colunas 100% nulas em 2022 que são usadas nas fórmulas do
+[`indicadores.md`](indicadores.md):**
+
+| Coluna nula em 2022 | Onde é usada |
+|---|---|
+| `populacao_urbana` | denominador água dos marts **1, 4, 10** |
+| `populacao_urbana_atendida_agua` | numerador dos marts **1, 4, 10** |
+| `populacao_urbana_atendida_esgoto` | numerador esgoto do mart **1** |
+| `populacao_urbana_residente_esgoto` | denominador esgoto do mart **1** |
+| os 3 `indice_atendimento_*` | **não** entram nas fórmulas (os marts recalculam `sum/sum`) |
+
+→ **2022 inviabiliza todos os marts urbanos** (1, 4 e 10) com as colunas
+autodeclaradas. Volumes, receita, despesa e investimento estão presentes em 2022.
+
+---
+
+## R3.2 — Informantes por ano (municípios com valor não nulo)
+
+`COLUMNS`/`count()` por ano. "População total" não existe → coluna omitida
+(ver nota de nomes). `populacao_urbana` ≈ nº de linhas em todo ano (só é nula em
+2022).
+
+| Ano | Linhas | pop_at_água | pop_at_esg | pop_urb | vol_água_prod | vol_esg_col | vol_esg_trat | receita_op | desp_total | invest_total |
+|---|---|---|---|---|---|---|---|---|---|---|
+| 1995 | 54 | 28 | 26 | 54 | 27 | 21 | 26 | 29 | 24 | 0 |
+| 1998 | 3.916 | 722 | 312 | 3.916 | 449 | 261 | 195 | 118 | 116 | 119 |
+| 2000 | 4.054 | 993 | 411 | 4.054 | 785 | 384 | 329 | 180 | 161 | 111 |
+| **2001** | 4.139 | **1.508** | 526 | 4.139 | **1.513** | 518 | 479 | **1.438** | **1.209** | **1.087** |
+| 2005 | 4.320 | 3.038 | 934 | 4.320 | 2.987 | 910 | 926 | 2.957 | 2.543 | 2.740 |
+| **2006** | 4.516 | 4.479 | **1.219** | 4.516 | 4.405 | **1.218** | **1.177** | 4.400 | 3.777 | 4.248 |
+| 2010 | 4.950 | 4.932 | 1.939 | 4.950 | 4.928 | 1.764 | 1.812 | 4.933 | 4.929 | 4.598 |
+| 2021 | 5.313 | 5.312 | 2.780 | 5.313 | 5.312 | 2.806 | 2.806 | 5.312 | 5.312 | 4.534 |
+| 2022 | 5.425 | 5.425 | 2.900 | **0** | 5.425 | 3.057 | 3.057 | 5.425 | 5.425 | 4.672 |
+
+*(tabela completa 1995–2022 disponível na consulta do Anexo E; acima, os anos de virada)*
+
+**Ano em que cada coluna passa de 1.000 municípios informantes:**
+
+| Coluna | 1º ano > 1.000 |
+|---|---|
+| `populacao_urbana` | **1998** (3.916) |
+| `populacao_atendida_agua` | **2001** (1.508) |
+| `volume_agua_produzido` | **2001** (1.513) |
+| `receita_operacional` | **2001** (1.438) |
+| `despesa_total_servico` | **2001** (1.209) |
+| `investimento_total_prestador` | **2001** (1.087) |
+| `populacao_atendida_esgoto` | **2006** (1.219) |
+| `volume_esgoto_coletado` | **2006** (1.218) |
+| `volume_esgoto_tratado` | **2006** (1.177) |
+
+→ Série financeira e de água fica robusta **a partir de 2001**; esgoto só
+**a partir de 2006**. Antes de 2001 qualquer agregado nacional/UF é frágil.
+
+---
+
+## R3.3 — Painel fixo 2010–2021 (marts 4 e 10)
+
+Chave dos índices urbanos = `populacao_urbana_atendida_agua` **e**
+`populacao_urbana` não nulos (numerador e denominador do atendimento urbano de
+água). `populacao_urbana` quase nunca é nula (2010–2021), então o painel é
+governado pela coluna *atendida*.
+
+| Recorte | Nº de municípios |
+|---|---|
+| não nulos em **todos os 12 anos** (2010–2021) | **4.472** |
+| presentes em **2010 e 2021** (os dois extremos) | 4.843 |
+| presentes em **2015 e 2021** | 4.953 |
+
+**Painel 2010–2021 por UF (4.472 municípios, todas as 27 UFs presentes):**
+
+| UF | n | UF | n | UF | n |
+|---|---|---|---|---|---|
+| MG | 687 | PB | 157 | MS | 72 |
+| SP | 516 | PI | 157 | ES | 70 |
+| BA | 376 | RN | 155 | PA | 63 |
+| RS | 374 | MA | 143 | MT | 54 |
+| PR | 374 | TO | 121 | RO | 42 |
+| SC | 246 | AL | 82 | AC | 21 |
+| GO | 227 | RJ | 79 | AP | 16 |
+| PE | 174 | SE | 75 | RR | 14 |
+| CE | 163 | | | AM | 13 |
+| | | | | DF | 1 |
+
+→ **Quartis (mart 10) no agregado nacional: viável** — 4.472 municípios dão
+~1.118 por quartil. **Por UF, inviável** nos pequenos (DF=1, AM=13, RR=14,
+AP=16, AC=21, RO=42): `ntile(4)` por UF não tem massa. Quartil de renda deve ser
+**nacional**, não por UF.
+
+---
+
+## R3.4 — Valores gigantes (marts 5 e 8)
+
+`investimento_total_prestador` e `despesa_total_servico`. População via
+`populacao_urbana` (não há total SNIS); `por_hab` = valor / `populacao_urbana`.
+
+**Top 10 `investimento_total_prestador`** — 9 das 10 linhas são o município
+**3550308 (São Paulo capital = SABESP, prestador regional)**:
+
+| id | UF | ano | valor (R$) | pop_urb | R$/hab |
+|---|---|---|---|---|---|
+| 3550308 | SP | 2016 | 2.625.398.495 | 11.929.962 | 220 |
+| 3550308 | SP | 2021 | 2.261.066.786 | 12.284.940 | 184 |
+| 3550308 | SP | 2017 | 2.173.013.357 | 11.998.090 | 181 |
+| 3550308 | SP | 2022 | 2.137.942.452 | *(nulo)* | — |
+| 3550308 | SP | 2015 | 2.085.629.739 | 11.860.245 | 176 |
+| **3547809** | **SP** | **2019** | **1.336.908.104** | **718.773** | **1.860** |
+
+→ a linha **3547809 (SP, 2019)** destoa: R$ 1.860/hab, ~10× o resto — típico de
+**valor de prestador regional atribuído ao município-sede**, não ao universo
+atendido.
+
+**Top 10 `despesa_total_servico`** — dominado por **3304557 (Rio de Janeiro
+capital = CEDAE)** e **3550308 (SABESP)**:
+
+| id | UF | ano | valor (R$) | pop_urb | R$/hab |
+|---|---|---|---|---|---|
+| 3304557 | RJ | 2022 | 7.266.639.142 | *(nulo)* | — |
+| 3550308 | SP | 2022 | 7.089.974.466 | *(nulo)* | — |
+| 3550308 | SP | 2021 | 6.099.473.275 | 12.284.940 | 497 |
+| 3550308 | SP | 2020 | 5.841.352.937 | 12.214.439 | 478 |
+
+**Valores idênticos repetidos em vários municípios** (sinal de prestador
+regional duplicado): praticamente **inexistente** acima de R$ 1 mi — só 3 casos
+(ano 2012 R$ 5,92 mi em 2 munic.; 2008 R$ 3,96 mi em 3 munic.; 2010 R$ 1,54 mi
+em 2 munic.). → A distorção **não** é duplicação do mesmo valor entre
+municípios; é **concentração no município-sede** do prestador regional (SABESP,
+CEDAE), que recebe todo o valor do prestador. **Casos suspeitos listados, nada
+corrigido.**
+
+---
+
+## R3.5 — Preparação para a junção com o IBGE
+
+### a) Integridade de `id_municipio`
+
+| Teste | Resultado |
+|---|---|
+| fora do padrão `^[0-9]{7}$` | **0** |
+| com espaços (`id <> trim(id)`) | **0** |
+| pares distintos (UF, 2 primeiros dígitos) | **27** = nº de UFs → cada UF tem **um único** prefixo |
+
+→ `id_municipio` tem sempre 7 dígitos, sem espaços, sem zeros à esquerda
+perdidos, e os 2 primeiros dígitos casam com a UF. **Nenhuma divergência.**
+Pronto para junção por `id_municipio` (texto, 7 dígitos) com IBGE-DTB/POP/PIB.
+
+### b) Municípios distintos
+
+| Métrica | Valor |
+|---|---|
+| municípios distintos no total | **5.549** (= esperado) |
+| municípios que aparecem em **1 só ano** | **31** |
+
+→ O universo bate com o esperado. Os 31 municípios de ano único não entram em
+painel e devem ser tratados na cobertura de junção (podem ser códigos antigos /
+fusões — a conferir contra a **versão (ano) da DTB**).
+
+### c) Distribuição por porte — 2021 (**proxy `populacao_urbana`**, ver ressalva)
+
+Não há população total na silver; a faixa oficial do **mart 6 depende de
+IBGE-POP (ainda não ingerido)**. Abaixo, diagnóstico sobre `populacao_urbana`:
+
+| Faixa (hab. urbanos) | Nº de municípios |
+|---|---|
+| até 5 mil | 2.110 |
+| 5–20 mil | 1.991 |
+| 20–50 mil | 670 |
+| 50–100 mil | 250 |
+| 100–500 mil | 245 |
+| acima de 500 mil | 47 |
+| **total** | **5.313** |
+
+> Ressalva: por **população urbana** a maioria é pequena; usando **população
+> total IBGE** as faixas sobem (há população rural não contada aqui). Esta tabela
+> é só para dimensionar o mart 6 — a faixa final **tem de usar IBGE-POP**.
+
+---
+
+## R3.6 — Pendências da spec v2.1 da silver
+
+### a) Alerta A2 — `populacao_urbana_atendida_agua` > `populacao_urbana`
+
+Comparação **urbana × urbana** (não contra o total). Violações por ano:
+
+| Ano | viola água | viola esgoto* |
+|---|---|---|
+| 2001 | 488 | 43 |
+| 2003 | 1.023 | 92 |
+| 2006 | 2.701 | 220 |
+| 2009 | 2.156 | 209 |
+| **2010** | **26** | 2 |
+| 2015 | 1 | 2 |
+| 2016 | 43 | 7 |
+| 2021 | 18 | 7 |
+
+\* esgoto = `populacao_urbana_atendida_esgoto` > `populacao_urbana_residente_esgoto`.
+
+→ A2 é **massivo antes de 2010** (centenas a milhares) e **pequeno na janela
+2010–2021** (≤ 43/ano em água, ≤ 7 em esgoto). Usando o **denominador urbano
+correto**, o excesso quase some — contraste com os 47.934 casos da bronze
+(R2.6), que comparavam `populacao_atendida_agua` (total) contra a urbana. A
+violação residual (dezenas/ano) ainda precisa de regra (clamp ou exclusão) nos
+marts 1/4/10.
+
+### b) Lista final de colunas 100% nulas em 2022 (para o alerta)
+
+Proposta de lista fechada (as 8 de R3.1):
+
+```
+populacao_urbana
+populacao_urbana_residente_agua
+populacao_urbana_atendida_agua
+populacao_urbana_residente_esgoto
+populacao_urbana_atendida_esgoto
+indice_atendimento_urbano_agua
+indice_atendimento_agua_esgoto
+indice_atendimento_esgoto_esgoto
+```
+
+Observação para o alerta: as variantes `_ibge`
+(`populacao_urbana_atendida_agua_ibge`, `populacao_urbana_residente_esgoto_ibge`)
+**não** entram na lista — elas têm dados em 2022 e são a provável substituta.
+
+### c) Unidades (amostragem, 2021)
+
+Municípios grandes amostrados (3550308 SP, 3304557 RJ, 5300108 DF, 2304400 CE,
+4314902 RS):
+
+| Grandeza | Evidência | Confere? |
+|---|---|---|
+| populações | SP `populacao_urbana` = 12.284.940 hab | ✅ habitantes |
+| volumes | SP `volume_agua_consumido` = 729.299,66 (×1.000 m³ = 729 mi m³/ano ≈ 163 L/hab·dia) | ✅ **1.000 m³/ano** |
+| monetário | SP `receita_operacional` = 7,25 bi; `despesa_total_servico` = 6,10 bi | ✅ **R$/ano (nominal)** |
+
+**Coluna fora do esperado — `volume_agua_produzido`:** em 2021, SP capital
+registra **144,60** (×1.000 m³) com **consumido = 729.299,66** — produzido
+<< consumido, **impossível**. RJ capital: produzido 3.259 vs. consumido 468.430.
+DF/CE/RS têm produzido > consumido (normais). Quantificação `produzido <
+consumido` na janela:
+
+| Ano | com ambos | produzido < consumido | produzido = 0 e consumido > 0 |
+|---|---|---|---|
+| 2010 | 4.926 | 139 | 109 |
+| 2015 | 5.077 | 180 | 104 |
+| 2021 | 5.312 | 227 | 123 |
+| 2022 | 5.425 | 244 | 115 |
+
+→ 140–244 municípios/ano com `volume_agua_produzido` inconsistente (inclui
+grandes prestadores como SABESP/CEDAE que parecem reportar produção por
+subsistema). **Impacto direto no mart 3 (perdas)**, cujo denominador é
+`volume_agua_produzido`: por município dá perda negativa; por UF, contamina SP e
+RJ. Exige regra de exclusão/validação.
+
+---
+
+## R3.7 — Conclusões e recomendações para a spec da gold
+
+*(apenas recomendações; nada implementado)*
+
+**Ano de referência por mart**
+
+| Mart | Ano(s) recomendado(s) | Motivo |
+|---|---|---|
+| 1 `atendimento_uf_ano` | **2021** (não 2022) | urbano autodeclarado 100% nulo em 2022 |
+| 2 `esgoto_coleta_tratamento_ano` | 1995–2022 (robusto ≥ **2006**) | volumes de esgoto só passam de 1.000 munic. em 2006 |
+| 3 `perdas_consumo_uf_ano` | 1995–2022 (robusto ≥ **2001**) | depende de `volume_agua_produzido` — **com exclusão** (R3.6c) |
+| 4 `ranking_atendimento_variacao` | **2010 e 2021** | painel fixo urbano; 2022 inviável |
+| 5 `financeiro_uf_ano` | 1995–2022 (robusto ≥ **2001**) | financeiro robusto a partir de 2001 |
+| 6 `atendimento_porte_ano` | 2010–2021 | janela IBGE; porte **exige IBGE-POP** |
+| 7 `populacao_sem_servico_uf_ano` | 2010–2021 | exige IBGE-POP |
+| 8 `investimento_per_capita_uf_ano` | 2010–2021 | exige IBGE-POP; excluir sedes de prestador regional (R3.4) |
+| 9 `atendimento_vs_pib_2021` | **2021** | único ano com urbano + PIB |
+| 10 `avanco_por_renda_painel` | **2010 e 2021** | painel + quartil nacional |
+
+**Painel fixo recomendado:** **2010–2021, 4.472 municípios** (não nulos em
+`populacao_urbana_atendida_agua` e `populacao_urbana` nos 12 anos), todas as 27
+UFs. Quartil de renda (mart 10): **nacional** (viável), **não por UF**.
+
+**Regras de exclusão de valores suspeitos (a decidir na spec):**
+1. **`volume_agua_produzido < volume_agua_consumido`** ou `= 0` com consumo > 0:
+   excluir do cálculo de perdas (mart 3) — 140–244 munic./ano.
+2. **Sedes de prestador regional** (ex.: 3550308 SABESP, 3304557 CEDAE): valor
+   financeiro/investimento concentrado; sinalizar em marts 5 e 8, cuidado no
+   `por habitante`.
+3. **Violação A2 residual** (urbana atendida > urbana), 2010–2021: clamp ou
+   exclusão nos marts 1/4/10.
+4. **Negativos** em despesa/índice (ver Rodada 1/2): tratar antes de somar.
+
+**Colunas que NÃO podem ser usadas em cada contexto:**
+- As **8 colunas urbanas/índices** (R3.6b) em **qualquer mart com ano = 2022**.
+- `populacao_urbana` como denominador em 2022 (não há `_ibge` equivalente).
+- `volume_agua_produzido` **sem filtro** no mart 3.
+- Qualquer coluna de investimento/despesa **para comparação entre anos** sem
+  deflator (R$ nominal).
+
+**Riscos para a junção com o IBGE:**
+- **31 municípios** de ano único e possíveis **códigos antigos/fusões**: casar
+  contra a **versão (ano) da DTB** e registrar não casados.
+- **População total ausente na silver**: marts 6, 7, 8, 9, 10 **bloqueados** até
+  a ingestão de **IBGE-POP**; porte (mart 6) idem.
+- **Janela do PIB (2010–2021)**: marts 9 e 10 limitados a esse intervalo.
+- Chave `id_municipio` está **limpa** (7 dígitos, prefixo UF coerente) — baixo
+  risco técnico de junção; o risco é de **cobertura temporal/territorial**, não
+  de formato.
+
+---
+
+## Anexo E — Consultas da Rodada 3
+
+```sql
+-- R3.1 colunas 100% nulas por ano (UNPIVOT descarta nulos -> anti-join)
+WITH years AS (SELECT DISTINCT ano FROM silver.municipio_agua_esgoto),
+cols AS (SELECT column_name AS name FROM duckdb_columns()
+         WHERE schema_name='silver' AND table_name='municipio_agua_esgoto'
+           AND column_name NOT IN ('ano','id_municipio','sigla_uf')),
+present AS (SELECT ano,name FROM (UNPIVOT silver.municipio_agua_esgoto
+             ON COLUMNS(* EXCLUDE (ano,id_municipio,sigla_uf))
+             INTO NAME name VALUE value) GROUP BY ano,name)
+SELECT y.ano, count(*), string_agg(c.name, ', ')
+FROM years y CROSS JOIN cols c
+LEFT JOIN present p ON p.ano=y.ano AND p.name=c.name
+WHERE p.name IS NULL GROUP BY y.ano ORDER BY y.ano;
+
+-- R3.2 informantes por ano
+SELECT ano, count(*), count(populacao_atendida_agua), count(populacao_atendida_esgoto),
+  count(populacao_urbana), count(volume_agua_produzido), count(volume_esgoto_coletado),
+  count(volume_esgoto_tratado), count(receita_operacional), count(despesa_total_servico),
+  count(investimento_total_prestador)
+FROM silver.municipio_agua_esgoto GROUP BY ano ORDER BY ano;
+
+-- R3.3 painel fixo (chave: urbana atendida agua + urbana)
+WITH base AS (SELECT id_municipio, sigla_uf, ano FROM silver.municipio_agua_esgoto
+  WHERE populacao_urbana_atendida_agua IS NOT NULL AND populacao_urbana IS NOT NULL)
+SELECT count(*) FROM (SELECT id_municipio FROM base WHERE ano BETWEEN 2010 AND 2021
+  GROUP BY id_municipio HAVING count(DISTINCT ano)=12);   -- idem 2010&2021, 2015&2021, por UF
+
+-- R3.4 valores gigantes + repetição entre municípios
+SELECT id_municipio, sigla_uf, ano, investimento_total_prestador, populacao_urbana
+FROM silver.municipio_agua_esgoto ORDER BY investimento_total_prestador DESC NULLS LAST LIMIT 10;
+SELECT ano, investimento_total_prestador, count(DISTINCT id_municipio)
+FROM silver.municipio_agua_esgoto WHERE investimento_total_prestador>1000000
+GROUP BY ALL HAVING count(DISTINCT id_municipio)>1 ORDER BY 2 DESC;
+
+-- R3.5 integridade da chave e municipios distintos
+SELECT count(*) FROM silver.municipio_agua_esgoto WHERE NOT regexp_matches(id_municipio,'^[0-9]{7}$');
+SELECT count(DISTINCT id_municipio) FROM silver.municipio_agua_esgoto;
+SELECT count(*) FROM (SELECT id_municipio FROM silver.municipio_agua_esgoto
+  GROUP BY id_municipio HAVING count(DISTINCT ano)=1);
+-- porte 2021 (proxy populacao_urbana)
+SELECT CASE WHEN populacao_urbana<5000 THEN '1' WHEN populacao_urbana<20000 THEN '2'
+  WHEN populacao_urbana<50000 THEN '3' WHEN populacao_urbana<100000 THEN '4'
+  WHEN populacao_urbana<500000 THEN '5' ELSE '6' END, count(*)
+FROM silver.municipio_agua_esgoto WHERE ano=2021 AND populacao_urbana IS NOT NULL GROUP BY 1;
+
+-- R3.6a alerta A2 (urbana x urbana)
+SELECT ano, count(*) FILTER (WHERE populacao_urbana_atendida_agua > populacao_urbana)
+FROM silver.municipio_agua_esgoto GROUP BY ano ORDER BY ano;
+
+-- R3.6c unidades: amostra + produzido<consumido
+SELECT ano, count(*) FILTER (WHERE volume_agua_produzido < volume_agua_consumido)
+FROM silver.municipio_agua_esgoto WHERE ano BETWEEN 2010 AND 2022 GROUP BY ano ORDER BY ano;
+```
+
+## Anexo F — Suposições e limitações da Rodada 3
+
+- **"População total"** não existe na silver SNIS; onde o enunciado a pediu
+  (itens 2 e 5c) usei `populacao_urbana` como **proxy de diagnóstico**, sempre
+  sinalizado. O valor oficial virá de **IBGE-POP** (não ingerido).
+- **Classificação de coluna por mart** segue [`indicadores.md`](indicadores.md);
+  "investimento total" = `investimento_total_prestador` (não `_municipio`/`_estado`).
+- **Painel R3.3** usa `populacao_urbana_atendida_agua` + `populacao_urbana` como
+  chave; outros marts (financeiro, volumes) teriam painel diferente.
+- **Casos suspeitos (R3.4, R3.6c)** foram apenas **listados/contados**; não
+  investiguei o dicionário do SNIS nem confirmei a causa (subsistema, prestador
+  regional, erro de carga). Nada foi corrigido.
+- A substituição `_ibge` em 2022 (R3.1) é **inferência** a partir dos dados; a
+  causa metodológica não foi confirmada em documentação do SNIS.
+- Não validei dígito verificador nem existência real de cada `id_municipio`
+  contra tabela oficial — isso é o **teste de cobertura de junção** a fazer na
+  ingestão do IBGE.
+
+---
+---
+
+# Verificação das decisões (Rodada 3)
+
+Teste das 6 decisões recomendadas em R3.7, com SQL, resultado e veredito
+(**CONFIRMA**, **CONFIRMA COM AJUSTE** ou **NÃO CONFIRMA**). MCP somente leitura.
+Colunas conferidas em `duckdb_columns()`; `TRY_CAST` não foi necessário.
+
+---
+
+## D1 — População total ausente (marts 6–10 bloqueados até IBGE-POP)
+
+Conferência: nenhuma coluna de PIB, população total IBGE ou região existe na
+silver (busca por `%pib%`, `%total_ibge%`, `%regiao%` → **0 resultados**); as 13
+colunas SNIS das fórmulas existem todas.
+
+Mapeamento fórmula → colunas (de [`indicadores.md`](indicadores.md)):
+
+| Mart | Colunas SNIS (existem na silver) | Falta (externo) | Depende de |
+|---|---|---|---|
+| 1 `atendimento_uf_ano` | pop_urbana, pop_urbana_atendida_agua/esgoto, pop_urbana_residente_esgoto | UF/região | **IBGE-DTB** |
+| 2 `esgoto_coleta_tratamento_ano` | volume_esgoto_coletado/tratado, volume_agua_consumido | — | **nenhum (100% SNIS)** |
+| 3 `perdas_consumo_uf_ano` | volume_agua_produzido/consumido, populacao_atendida_agua | UF/região | **IBGE-DTB** |
+| 4 `ranking_atendimento_variacao` | pop_urbana_atendida_agua, pop_urbana | UF/região | **IBGE-DTB** |
+| 5 `financeiro_uf_ano` | investimento_total_prestador, despesa_exploracao, receita_operacional_direta | UF/região | **IBGE-DTB** |
+| 6 `atendimento_porte_ano` | populacao_atendida_agua/esgoto | **populacao_total_ibge** (numerador porte + denominador) | **IBGE-POP** |
+| 7 `populacao_sem_servico_uf_ano` | populacao_atendida_agua/esgoto | **populacao_total_ibge** | **IBGE-POP + IBGE-DTB** |
+| 8 `investimento_per_capita_uf_ano` | investimento_total_prestador | **populacao_total_ibge** | **IBGE-POP + IBGE-DTB** |
+| 9 `atendimento_vs_pib_2021` | urbanas, volumes, investimento | **pib_municipio + populacao_total_ibge** | **IBGE-PIB + IBGE-POP** |
+| 10 `avanco_por_renda_painel` | pop_urbana_atendida_agua, pop_urbana | **pib_municipio + populacao_total_ibge** | **IBGE-PIB + IBGE-POP** |
+
+```sql
+SELECT column_name FROM duckdb_columns()
+WHERE schema_name='silver' AND table_name='municipio_agua_esgoto'
+  AND (lower(column_name) LIKE '%pib%' OR lower(column_name) LIKE '%total_ibge%'
+       OR lower(column_name) LIKE '%regiao%');   -- 0 linhas
+```
+
+**Veredito: CONFIRMA.** Marts **6, 7, 8, 9, 10** não calculam sem **IBGE-POP**
+(e 9/10 também sem **IBGE-PIB**). Marts **1, 3, 4, 5, 7, 8** precisam de
+**IBGE-DTB** para UF/região. Só o **mart 2 é 100% SNIS**. Marts 1–5 produzem a
+parte SNIS sem IBGE-POP (mas sem recorte de região até a DTB entrar).
+
+---
+
+## D2 — Ano 2021 e colunas `_ibge`
+
+Não existe `populacao_urbana_ibge` (residente urbana total); as variantes `_ibge`
+são de *atendida água* e *residente esgoto*. Comparação da atendida urbana de
+água com sua `_ibge`, 2019–2022:
+
+| Ano | munic. c/ ambas | dif. mediana % | dif. p95 % | nº dif. > 10% |
+|---|---|---|---|---|
+| 2019 | 5.177 | 38,36 | 80,05 | 4.631 |
+| 2020 | 5.337 | 38,44 | 80,72 | 4.765 |
+| 2021 | 5.302 | 38,38 | 79,96 | 4.719 |
+| 2022 | **0** | — | — | 0 |
+
+Informantes em 2021 (completude):
+
+| Mart | Coluna | Informantes 2021 |
+|---|---|---|
+| 1 | populacao_urbana | 5.313 |
+| 1 | populacao_urbana_atendida_agua | 5.302 |
+| 1 | populacao_urbana_residente_esgoto | 2.787 |
+| 1 | populacao_urbana_atendida_esgoto | 2.779 |
+| 3 | volume_agua_produzido / consumido | 5.312 / 5.312 |
+| 3/7 | populacao_atendida_agua | 5.312 |
+| 7 | populacao_atendida_esgoto | 2.780 |
+
+**Veredito: CONFIRMA COM AJUSTE.** 2021 tem população urbana de **água completa**
+(~5.300) — ótimo ano de referência; esgoto urbano é estruturalmente menor
+(~2.780, nem toda cidade tem esgoto). **Ajuste:** a coluna `_ibge` **não** serve
+como "verificação de sensibilidade" trocável — difere da autodeclarada em
+**~38% na mediana** e **>10% em ~89% dos municípios**; é uma **medida distinta**
+(base IBGE), não um recálculo da mesma grandeza. Em 2022 a autodeclarada é nula,
+então nem há par. Tratar `_ibge` como **série alternativa rotulada**, nunca
+como aproximação da coluna oficial.
+
+---
+
+## D3 — `volume_agua_produzido` e regra do mart 3 (perdas)
+
+Diagnóstico 2010–2021 (IN049 ≈ `(produzido − consumido)/produzido`):
+
+| Ano | c/ ambos | produzido < consumido | produzido nulo/0 e consumo>0 | IN049 calculável (prod>0) | IN049 fora de 0–100 |
+|---|---|---|---|---|---|
+| 2010 | 4.926 | 139 | 109 | 4.819 | 30 |
+| 2015 | 5.077 | 180 | 104 | 4.942 | 76 |
+| 2020 | 5.337 | 225 | 125 | 5.167 | 100 |
+| 2021 | 5.312 | 227 | 123 | 5.168 | 104 |
+
+Índice nacional ponderado `sum(prod−cons)/sum(prod)`:
+
+| Ano | perda SEM exclusão | perda COM exclusão (prod ≥ cons e prod>0) |
+|---|---|---|
+| 2010 | 29,72% | **41,13%** |
+| 2015 | 30,04% | **38,82%** |
+| 2018 | 19,90% | **36,68%** |
+| 2021 | 22,65% | **37,24%** |
+
+**Veredito: CONFIRMA.** A regra muda o resultado **de forma relevante**: sem
+exclusão a perda nacional cai para 20–30% (puxada por linhas com produzido
+<< consumido, p.ex. SABESP 2021 produzido=144 vs. consumido=729.299); com
+exclusão fica em **37–41%**, condizente com o nível nacional conhecido (~38–40%).
+Excluir as linhas `produzido < consumido` (≈139–227/ano) **e** `produzido nulo/0
+com consumo>0` (≈100–125/ano) é necessário. Relatar a contagem excluída por ano.
+
+### D3 revisado — fórmula completa do IN049 (glossário SNIS 2022)
+
+`IN049 = (AG006 + AG018 − AG010 − AG024) / (AG006 + AG018 − AG024) × 100`.
+Colunas reais na silver (via `duckdb_columns()`):
+
+| Código | Grandeza | Coluna na silver |
+|---|---|---|
+| AG006 | volume produzido | `volume_agua_produzido` |
+| AG018 | volume (tratada) importado | `volume_agua_tratada_importado` |
+| AG010 | volume consumido | `volume_agua_consumido` |
+| AG024 | volume de serviço | `volume_servico_agua` |
+
+AG018 e AG024 são majoritariamente nulos → tratados como **0** (`coalesce`);
+exijo AG006 e AG010 não nulos. "Inconsistente" = `(AG006+AG018−AG024) < AG010`.
+
+| Ano | linhas válidas | (a) inconsistentes | (c) den. nulo/0/neg | (b) índice TODAS | (b) índice SEM inconsist. |
+|---|---|---|---|---|---|
+| 2010 | 4.926 | 30 | 0 | 39,25 | 39,30 |
+| 2011 | 4.930 | 7 | 0 | 39,06 | 39,07 |
+| 2012 | 5.061 | 19 | 3 | 37,42 | 37,43 |
+| 2013 | 5.030 | 34 | 14 | 38,09 | 38,19 |
+| 2014 | 5.105 | 57 | 5 | 37,08 | 37,23 |
+| 2015 | 5.077 | 57 | 31 | 36,88 | 37,02 |
+| 2016 | 5.161 | 38 | 31 | 38,24 | 38,36 |
+| 2017 | 5.116 | 1 | 37 | 38,55 | 38,55 |
+| 2018 | 5.135 | 1 | 30 | 35,53 | 35,54 |
+| 2019 | 5.177 | 1 | 23 | 35,97 | 35,98 |
+| 2020 | 5.337 | 0 | 45 | 36,42 | 36,42 |
+| 2021 | 5.312 | 2 | 21 | 36,86 | 36,86 |
+
+**(d) UFs que mudam mais de 5 pp com a exclusão: nenhuma** (0 de 324 pares
+UF-ano; maior diferença observada = **1,67 pp**).
+
+**Comparação com o teste anterior (só `produzido`):**
+
+| | Simplificada `(prod−cons)/prod` | IN049 completo |
+|---|---|---|
+| Índice nacional (todas) | **22–30%** | **35–39%** (nível oficial ~40%) |
+| Inconsistentes/ano | 139–227 | **0–57** |
+| Efeito da exclusão | **+10 a +17 pp** | **≤ 0,15 pp** |
+
+**Veredito: CONFIRMA COM AJUSTE (corrige o D3 original).** A fórmula completa
+muda o diagnóstico: o que parecia "produzido << consumido" eram, em boa parte,
+**prestadores que importam água tratada** (AG018) — o denominador
+`produzido + importado − serviço` os acomoda. Com o IN049 correto o índice
+nacional já fica em **~36–39% com todas as linhas**, e a **exclusão passa a ser
+imaterial** (≤ 0,15 pp no nacional, 0 UFs acima de 5 pp). **Ajuste:** manter a
+exclusão das inconsistentes **apenas como salvaguarda, com flag e contagem por
+ano** (0–57 linhas), **não** como a regra decisiva do D3 original — a regra antiga
+`produzido < consumido` seria **excessiva** (excluiria importadores legítimos).
+Mart 3 deve usar a **fórmula completa do IN049**, não a simplificada.
+
+---
+
+## D4 — Sedes de prestador regional
+
+R3.4: a distorção é **concentração no município-sede**, não duplicação (só 3
+valores idênticos repetidos acima de R$ 1 mi). Testes de critério de flag:
+
+- **10× a mediana per capita da UF-ano:** flaga **3.862** munic.-ano / 1.549
+  municípios / 25 UFs → **frouxo demais** (a distribuição é muito assimétrica;
+  mediana ≈ R$ 15/hab).
+- Distribuição nacional de investimento per capita (2010–2021): mediana
+  **R$ 15**, p95 **R$ 232**, p99 **R$ 745**, **p99,5 R$ 1.217**, máx R$ 29.369.
+- **Critério proposto (reproduzível): per capita > R$ 1.000/hab** (≈ p99,5
+  nacional) → **~290 munic.-ano**. Impacto no total de investimento por UF
+  (quanto sairia se excluído):
+
+| UF | nº flag | % do total da UF |
+|---|---|---|
+| **RN** | 74 | **35,89%** |
+| MA | 5 | 10,81% |
+| SE | 6 | 8,14% |
+| PE | 19 | 7,52% |
+| SP | 40 | 4,54% |
+| MG | 52 | 2,58% |
+| demais 11 UFs | ≤ 24 | < 3,7% |
+
+```sql
+WITH b AS (SELECT ano,sigla_uf,id_municipio, investimento_total_prestador inv,
+  investimento_total_prestador/nullif(populacao_urbana,0) pc
+  FROM silver.municipio_agua_esgoto
+  WHERE ano BETWEEN 2010 AND 2021 AND investimento_total_prestador>0 AND populacao_urbana>0)
+SELECT sigla_uf, count(*) FILTER (WHERE pc>1000) n,
+  round(sum(inv) FILTER (WHERE pc>1000)*100.0/sum(inv),2) pct
+FROM b GROUP BY sigla_uf ORDER BY pct DESC;
+```
+
+**Veredito: CONFIRMA COM AJUSTE.** Manter nos totais por UF é correto —
+excluir destruiria **RN (−36%)** e distorceria MA/SE/PE. **Ajuste ao critério:**
+o limiar não é "mesmo valor repetido em N municípios" (quase não ocorre) nem
+"10× a mediana" (frouxo); adotar **per capita > R$ 1.000/hab (≈ p99,5 nacional)**
+como flag `prestador_regional_provavel`, usada só para **excluir dos rankings
+municipais per capita** (marts 8 e 9). Observação: a sede SABESP atribuída à
+capital de SP (R$ 184/hab) **não** é flagada por per capita — correto, pois não
+distorce ranking per capita; o problema per capita aparece quando a sede é um
+município pequeno. RN merece nota específica na spec.
+
+---
+
+## D5 — Violação A2 residual (exclusão com flag vs clamp)
+
+Índice nacional de cobertura urbana de água `sum(atendida)/sum(urbana)`,
+2010–2021:
+
+| Ano | nº viola | dif. média (hab) | dif. máx (hab) | baseline | exclusão | clamp |
+|---|---|---|---|---|---|---|
+| 2010 | 26 | 2.113 | 7.758 | 92,16 | 92,10 | 92,13 |
+| 2011 | 35 | 6.134 | 111.181 | 93,15 | 92,98 | 93,02 |
+| 2016 | 43 | 1.363 | 30.065 | 92,97 | 92,91 | 92,94 |
+| 2021 | 18 | 6.275 | 31.100 | 93,45 | 93,33 | 93,38 |
+
+Linhas afetadas por UF (2010–2021): só **TO** passa de 1% (**1,96%**); PA 0,89%,
+SE 0,78%, RJ 0,76%, MG 0,58%; todas as demais < 1%.
+
+**Veredito: CONFIRMA COM AJUSTE.** A exclusão com flag funciona e é defensável.
+**Ajuste de expectativa:** o impacto é **negligível** — exclusão e clamp diferem
+do baseline em **≤ 0,17 pp** no nacional, e só **TO** ultrapassa 1% das linhas.
+Como exclusão ≈ clamp aqui, a decisão é de baixo risco; recomendo manter a
+**exclusão com flag** (mais transparente: o dado inválido não entra), mas clamp
+seria igualmente aceitável. O que importa é **registrar a flag**, não o método.
+
+---
+
+## D6 — Versão da DTB e 31 municípios de ano único
+
+A silver **não tem coluna de nome** de município (nome → **a confirmar na
+ingestão da DTB**). Os 31 municípios de ano único, por ano de aparição:
+
+| Ano único | nº | Comportamento provável |
+|---|---|---|
+| 1999 | 1 | 2210953(PI) — meio da série (reporte esporádico) |
+| 2006–2016 | 11 | meio da série (esporádicos ou código alterado) |
+| 2020 | 7 | 2102754(MA),2103125(MA),2201919/2203859/2205953(PI),5101852(MT),5214903(GO) |
+| 2021 | 1 | 2908101(BA) |
+| **2022 (último ano)** | **12** | 1302108(AM),2105963/2107902(MA),2200954/2205458/2210391(PI),2308351(CE),2700805(AL),2900108(BA),4304853(RS),5102694(MT),5219456(GO) — **prováveis novos informantes / emancipações** |
+
+- **Só no último ano (2022): 12** → entram agora no SNIS; provável
+  emancipação recente ou primeiro reporte — **a confirmar na ingestão da DTB**.
+- **Só no primeiro ano (1995): 0.**
+- **No meio da série: 19** → reporte esporádico ou código que mudou/fundiu —
+  **a confirmar na ingestão da DTB**.
+- **Formato:** todos os `id_municipio` têm 7 dígitos (R3.5a: 0 fora do padrão);
+  **nenhum id fora do padrão**.
+
+**Veredito: CONFIRMA.** Usar a **DTB mais recente (2025)** e listar divergências
+no teste de cobertura, sem correção manual, é adequado: os 31 são majoritariamente
+entrantes de 2022 e esporádicos de meio de série, e **nenhum tem formato
+inválido**, então a conciliação é de **cobertura** (existência/vigência na DTB),
+não de formato. Nome, emancipação vs. fusão e vigência de cada código ficam
+**a confirmar na ingestão da DTB**.
+
+---
+
+## Quadro-resumo das 6 decisões
+
+| # | Decisão | Veredito | Ajuste proposto |
+|---|---|---|---|
+| D1 | Marts 6–10 bloqueados até IBGE-POP | **CONFIRMA** | Explicitar: 6–10 exigem IBGE-POP (9/10 também IBGE-PIB); 1,3,4,5,7,8 exigem IBGE-DTB; só mart 2 é 100% SNIS |
+| D2 | 2021 nos marts urbanos; `_ibge` como sensibilidade | **CONFIRMA COM AJUSTE** | `_ibge` é medida distinta (dif. mediana 38%), não recálculo; usar como série rotulada, não como aproximação |
+| D3 | Perdas IN049 excluindo produzido<consumido | **CONFIRMA COM AJUSTE** (ver "D3 revisado") | Usar a fórmula completa do IN049 (AG006+AG018−AG010−AG024)/(AG006+AG018−AG024); com ela o nacional já é ~36–39% e a exclusão vira só salvaguarda (≤0,15 pp, 0 UFs >5 pp). A regra simplificada `produzido<consumido` excluía importadores legítimos |
+| D4 | Sedes regionais: manter no total, flag, excluir per capita | **CONFIRMA COM AJUSTE** | Flag objetiva = per capita > R$ 1.000/hab (≈ p99,5); nota especial para RN (−36% se excluído do total) |
+| D5 | A2 residual: exclusão com flag (não clamp) | **CONFIRMA COM AJUSTE** | Impacto negligível (≤0,17 pp; só TO>1%); exclusão ok, clamp equivalente — o essencial é a flag |
+| D6 | DTB 2025; listar divergências dos 31 de ano único | **CONFIRMA** | 12 são entrantes de 2022, 19 de meio de série, 0 fora de formato; nome/vigência a confirmar na ingestão |
+
+## Texto pronto para `docs/decisoes.md` (não criar o arquivo; só o texto)
+
+```
+- D1 (2026-11-08): Marts 6–10 ficam bloqueados ate ingerir IBGE-POP (e 9,10 tambem IBGE-PIB); marts 1,3,4,5,7,8 dependem de IBGE-DTB para UF/regiao; mart 2 e 100% SNIS. Motivo: a silver nao tem populacao total, PIB nem regiao (0 colunas).
+- D2 (2026-11-08): Ano de referencia dos marts urbanos (1,4,9,10) e 2021; as colunas _ibge sao serie alternativa rotulada, nao verificacao de sensibilidade. Motivo: 2021 tem agua urbana completa (~5.300 informantes) e as _ibge diferem ~38% na mediana da autodeclarada.
+- D3 (2026-11-08): Mart 3 (perdas) usa IN049 e exclui linhas com produzido<consumido e produzido nulo/0 com consumo positivo, reportando a contagem por ano. Motivo: a exclusao corrige a perda nacional de ~23% para ~37% (nivel oficial ~40%).
+- D4 (2026-11-08): Sedes de prestador regional permanecem nos totais por UF, com flag prestador_regional_provavel (per capita > R$ 1.000/hab, ~p99,5 nacional), e sao excluidas apenas dos rankings municipais per capita (marts 8 e 9); RN tem nota propria. Motivo: concentram valor no municipio-sede; excluir do total distorceria RN (-36%).
+- D5 (2026-11-08): Violacao A2 (urbana atendida agua > urbana) e excluida do calculo de cobertura com flag, em vez de clamp. Motivo: impacto nacional negligivel (<=0,17 pp; so TO >1% das linhas); exclusao e mais transparente.
+- D6 (2026-11-08): Usar a DTB mais recente (2025) e conciliar os 31 municipios de ano unico no teste de cobertura, sem correcao manual. Motivo: 12 sao entrantes de 2022, 19 esporadicos de meio de serie, 0 com id fora do padrao de 7 digitos.
+```
+
+## Anexo G — Consultas da Verificação
+
+```sql
+-- D2 dif % autodeclarada vs _ibge (2019-2022)
+SELECT ano, median(abs(populacao_urbana_atendida_agua-populacao_urbana_atendida_agua_ibge)*100.0
+  /nullif(populacao_urbana_atendida_agua_ibge,0)) dif_mediana
+FROM silver.municipio_agua_esgoto WHERE ano BETWEEN 2019 AND 2022 GROUP BY ano;
+
+-- D3 perda nacional com/sem exclusao
+SELECT ano, sum(volume_agua_produzido-volume_agua_consumido)*100.0/sum(volume_agua_produzido) sem_excl,
+  sum(CASE WHEN volume_agua_produzido>=volume_agua_consumido AND volume_agua_produzido>0
+        THEN volume_agua_produzido-volume_agua_consumido END)*100.0
+  /sum(CASE WHEN volume_agua_produzido>=volume_agua_consumido AND volume_agua_produzido>0
+        THEN volume_agua_produzido END) com_excl
+FROM silver.municipio_agua_esgoto WHERE ano BETWEEN 2010 AND 2021 GROUP BY ano ORDER BY ano;
+
+-- D5 baseline/exclusao/clamp (atd = alias; 'at' e palavra reservada)
+WITH b AS (SELECT ano, populacao_urbana_atendida_agua atd, populacao_urbana urb
+  FROM silver.municipio_agua_esgoto WHERE ano BETWEEN 2010 AND 2021 AND populacao_urbana>0)
+SELECT ano, sum(atd)*100.0/sum(urb) baseline,
+  sum(atd) FILTER (WHERE atd<=urb)*100.0/sum(urb) FILTER (WHERE atd<=urb) exclusao,
+  sum(least(atd,urb))*100.0/sum(urb) clamp
+FROM b GROUP BY ano ORDER BY ano;
+
+-- D6 municipios de ano unico
+WITH u AS (SELECT id_municipio, min(sigla_uf) uf, min(ano) ano
+  FROM silver.municipio_agua_esgoto GROUP BY id_municipio HAVING count(DISTINCT ano)=1)
+SELECT ano, count(*), string_agg(id_municipio||'('||uf||')', ', ') FROM u GROUP BY ano ORDER BY ano;
+```
+
+## Anexo H — Suposições da Verificação
+
+- **D1:** mapeamento fórmula→coluna segue [`indicadores.md`](indicadores.md);
+  `populacao_total_ibge`, `pib_municipio` e `regiao` são nomes previstos em
+  [`fontes-ibge.md`](fontes-ibge.md), ainda inexistentes na silver.
+- **D2:** comparei a atendida urbana de água (não há `populacao_urbana_ibge`);
+  "sensibilidade" foi interpretada como troca de coluna na mesma fórmula.
+- **D3:** IN049 aproximado por `(produzido−consumido)/produzido`; "volume
+  disponibilizado" oficial (produzido + importado − exportado − serviço)
+  **a confirmar** no glossário — pode alterar as contagens.
+- **D4:** critério per capita usa `populacao_urbana` como denominador (não há
+  total SNIS); o limiar R$ 1.000/hab é calibrado pela p99,5 **nacional**
+  observada, não por norma do SNIS. "Prestador regional" não foi confirmado no
+  cadastro de prestadores.
+- **D5:** exclusão/clamp calculados só para o índice nacional e participação de
+  linhas por UF; não recalculei cada índice de UF individualmente.
+- **D6:** classificação emancipação/fusão é **inferência** pelo ano de aparição;
+  nome e vigência de cada código **a confirmar na ingestão da DTB** (sem internet).
