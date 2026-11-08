@@ -355,18 +355,35 @@ linha do mart).
 | `cobertura_2010` | DECIMAL | `populacao_urbana_atendida_agua/nullif(populacao_urbana,0) × 100` em 2010 | % |
 | `cobertura_2021` | DECIMAL | idem em 2021 | % |
 | `variacao_pp` | DECIMAL | `cobertura_2021 − cobertura_2010` | pontos percentuais |
-| `posicao` | INTEGER | `rank() OVER (ORDER BY variacao_pp DESC)` | — |
+| `posicao` | INTEGER | **D26:** `row_number() OVER (ORDER BY variacao_pp DESC, populacao_urbana_fim DESC, id_municipio ASC)` — 1..N única, **sem buracos** (posição 1 = maior melhoria) | — |
+| `posicao_empate` | INTEGER | **D26:** `rank() OVER (ORDER BY variacao_pp DESC)` — empates **compartilham** a posição (com buracos) | — |
+| `variacao_extrema` | BOOLEAN | **diagnóstico:** `abs(variacao_pp) > 80` (12 casos); possível erro de dado ou mudança de prestador/cobertura, **preservado sem correção** | — |
 
 - **Regra D21:** o mart traz **só** o ranking (`posicao`) e a variação em pontos
   percentuais (`variacao_pp`); **sem `quintil_variacao`**.
 - **Regra D5:** aplicar a exclusão A2 por município-ano (um município com
-  violação em 2010 ou 2021 sai do painel, com flag no diagnóstico).
+  violação em 2010 ou 2021 sai do painel, com flag no diagnóstico). **41
+  excluídos** (26 em 2010, 16 em 2021; sobrepostos), todos membros do painel.
+- **Regra D26 (empates):** `posicao` = `row_number()` ordenado por `variacao_pp
+  DESC, populacao_urbana_fim DESC, id_municipio ASC` (1..N única, sem buracos);
+  `posicao_empate` = `rank()` sobre `variacao_pp DESC` (empates compartilham). O
+  desempate só por `id_municipio` daria ordem arbitrária nos extremos (vários
+  empatados em +100 pp), por isso o critério de população urbana de 2021.
 - **Fórmula:** cobertura **por município** em cada ano (não ponderar — é 1
-  município por linha); variação = ano_fim − ano_início; `rank()` sobre a
-  variação (window function; roteiro `CTE` + `lag()`/`rank()`).
-- **Aceite:** nº de linhas = **painel fixo único (4.472)** menos os excluídos por
-  A2 (**chute a confirmar** após o SELECT com a exclusão aplicada).
-  `municipios_informantes` = o próprio painel. `posicao` sem buracos de 1 a N.
+  município por linha); variação = ano_fim − ano_início; window functions
+  (roteiro `CTE` + `row_number()`/`rank()`).
+- **Aceite (confirmado no SELECT/executor, 2026-11-08):** **4.431 linhas** =
+  painel fixo único **4.472** menos **41** excluídos por A2 (identidade D5:
+  4.472 = 4.431 + 41 ✓). PK `id_municipio` única (1 linha/município); `posicao`
+  1..4.431 sem buracos; `posicao_empate` 1..4.429 (empates compartilham, mín. 1);
+  `variacao_pp ∈ [−100, +100]`, mediana 0 (1.371 municípios já a 100% nos dois
+  anos); **12** casos de `variacao_extrema`. Dimensões DTB não nulas. **10 colunas.**
+- **Diagnóstico de extremos (preservados sem correção, "a investigar"):**
+  **3162500/MG** (11,8%→100%, **+88,2 pp**, ~86 mil urb. em 2021 — maior salto em
+  município grande); **3301900/RJ** (81,8%→21,3%, **−60,5 pp**, ~241 mil urb. —
+  maior piora grande); pioras de **100%→0% na PB** (`2506004`, `2516409`,
+  `2500908`). Possível mudança de prestador/cobertura ou erro de dado; **sem
+  clamp, sem correção**, sinalizados por `variacao_extrema`.
 
 ---
 
@@ -383,39 +400,75 @@ linha do mart).
 |---|---|---|---|
 | `ano` | INTEGER | 1995–2022 | — |
 | `sigla_uf`, `nome_uf`, `nome_regiao` | VARCHAR | DTB | — |
-| `investimento_total` | DECIMAL | `Σinvestimento_total_prestador` | R$ (nominal) |
-| `despesa_exploracao` | DECIMAL | `Σdespesa_exploracao` | R$ (nominal) |
-| `receita_operacional_direta` | DECIMAL | `Σreceita_operacional_direta` | R$ (nominal) |
-| `indice_despesa_sobre_receita` | DECIMAL | `Σdespesa_exploracao / nullif(Σreceita_operacional_direta,0) × 100` (mesmo ano) | % |
-| `tarifa_media` | DECIMAL | **D18/D22:** `Σreceita_operacional_direta / (nullif(Σ(volume_agua_faturado+volume_esgoto_faturado),0) × 1000)` — soma sobre soma (FN001 ÷ (AG011+ES007)) | R$/m³ (nominal) |
-| `despesa_unitaria` | DECIMAL | **D18/D22:** `Σdespesa_exploracao / (nullif(Σ(volume_agua_faturado+volume_esgoto_faturado),0) × 1000)` — soma sobre soma (FN017 ÷ (AG011+ES007)) | R$/m³ (nominal) |
+| `investimento_total` | DECIMAL | `Σinvestimento_total_prestador` (**todos** os municípios — o dinheiro foi gasto) | R$ (nominal) |
+| `investimento_total_sem_atipicos` | DECIMAL | **D4/D28:** idem, **excluindo** os municípios com flag `investimento_atipico` | R$ (nominal) |
+| `despesa_total_servicos` | DECIMAL | **D27:** `Σdespesa_total_servico` (FN017/DTS) | R$ (nominal) |
+| `despesa_exploracao_dex` | DECIMAL | **D27:** `Σdespesa_exploracao` (FN015/DEX, sem indicador por m³) | R$ (nominal) |
+| `receita_operacional_direta` | DECIMAL | `Σreceita_operacional_direta` (FN001) | R$ (nominal) |
+| `indice_despesa_sobre_receita` | DECIMAL | **D27:** `Σdespesa_total_servico / nullif(Σreceita_operacional_direta,0) × 100` no universo `dts` e `fn001` não nulos (mesmo ano) — **despesa÷receita** (fração da receita consumida pela despesa total; o inverso receita÷despesa seria o IN012, não pedido aqui) | % |
+| `tarifa_media` | DECIMAL | **D18/D22:** `Σreceita_operacional_direta / (nullif(Σ(volume_agua_faturado+volume_esgoto_faturado),0) × 1000)` — soma sobre soma (FN001 ÷ (AG011+ES007)) → IN004 | R$/m³ (nominal) |
+| `despesa_unitaria` | DECIMAL | **D22/D27:** `Σdespesa_total_servico / (nullif(Σ(volume_agua_faturado+volume_esgoto_faturado),0) × 1000)` — soma sobre soma (**FN017** ÷ (AG011+ES007)) → IN003 | R$/m³ (nominal) |
 | `municipios_informantes_investimento` | INTEGER | municípios com investimento não nulo | contagem |
-| `municipios_informantes_tarifa` | INTEGER | **D22:** municípios com numerador e denom. de faturamento não nulos e **denom. > 0** (universo comum) | contagem |
-| `valor_nominal` | BOOLEAN | sempre `true` | — |
+| `municipios_informantes_tarifa` | INTEGER | **D22:** municípios com `fn001` não nulo e `vol_fat > 0` (universo comum) | contagem |
+| `municipios_informantes_despesa` | INTEGER | **D22/D27:** municípios com `dts` não nulo e `vol_fat > 0` (universo comum) | contagem |
+| `municipios_investimento_atipico` | INTEGER | **D4/D28:** municípios com flag `investimento_atipico`, por grão | contagem |
 
 - **Denominador:** razões só **dentro do mesmo ano e universo SNIS**.
-- **Regra D18/D22 (verificada nos dados):** **tarifa média** e **despesa
+- **Regra D18/D22/D27 (verificada nos dados):** **tarifa média** e **despesa
   unitária** são **colunas deste mart** (não um 11º mart), soma sobre soma. O
   denominador comum é `volume_agua_faturado + volume_esgoto_faturado`
   (AG011+ES007). **Unidade R$/m³:** o volume vem em **1.000 m³/ano**, então a
   conversão **divide por 1.000** (`× 1000` no denominador) — com **comentário
-  explícito no SQL**. **Universo comum** (`municipios_informantes_tarifa`):
-  numerador e denominador não nulos **e denominador > 0**. Confirmação: identidade
-  FN001 fecha 100% e a série nacional 2010–2021 vai de **R$ 2,18 → 4,12/m³**
-  (tarifa) — ver seção "Verificação de despesa unitária e tarifa média" de
-  [`investigacao-silver.md`](investigacao-silver.md).
-- **Anos:** 1995–2022 (robusto ≥ 2001).
-- **Fontes:** SNIS; **IBGE-DTB**.
-- **Regra:** **R$ nominal** — nunca comparar anos sem correção; flag
-  `valor_nominal = true`. Sedes de prestador regional **permanecem** no total por
-  UF (D4; a flag per capita só afeta marts 8 e 9).
-- **Aceite:** até **27 × 28 = 756 linhas** (menos nos anos iniciais; **chute a
-  confirmar**). Conferência cruzada: `Σinvestimento_total` das 27 UFs em 2021 =
-  **R$ 15.297.535.452,19** (total Brasil 2021, confirmado no MCP; ver seção 11).
+  explícito no SQL**. **D27:** a `despesa_unitaria` (IN003) usa **FN017 =
+  `despesa_total_servico` (DTS)**, não `despesa_exploracao` (FN015/DEX, que fica
+  como `despesa_exploracao_dex` em R$). **Universo comum** (por índice): numerador
+  e denominador não nulos **e denominador > 0** — colunas
+  `municipios_informantes_tarifa` e `municipios_informantes_despesa`. Confirmação:
+  identidade FN001 fecha 100%; DTS ⊇ DEX em 99,3–99,8% das linhas; a série
+  nacional 2010–2021 vai de **R$ 2,18 → 4,12/m³** (tarifa) e **R$ 2,06 → 3,87/m³**
+  (despesa unitária DTS) — ver "Verificação de despesa unitária e tarifa média" de
+  [`investigacao-silver.md`](investigacao-silver.md) e D27.
+- **Regra D4/D28 (investimento atípico):** flag **`investimento_atipico`** quando
+  o **investimento per capita do município > R$ 1.000/hab** (limiar **nominal**,
+  sem ajuste por inflação). Exige **população IBGE** (janela **2010–2021**); fora
+  da janela ou sem população IBGE a flag **não é avaliada** e o município fica nos
+  **dois** totais (`investimento_total_sem_atipicos` = `investimento_total` nesses
+  grãos). Os atípicos **permanecem** em `investimento_total` (o dinheiro foi
+  gasto) e **saem** de `investimento_total_sem_atipicos`. **Mesma regra e mesmo
+  nome reusados no mart 8.** A **hipótese de prestador regional é hipótese, não
+  fato** (a silver não tem coluna de prestador). **Nota de UF:** **RN** é a UF mais
+  afetada (−29% do total se os atípicos fossem excluídos; cita MA/SE/PE).
+- **Sensibilidade do limiar (D28, MCP 2026-11-08):**
 
-> **D18/D22 (fechado, verificado nos dados):** tarifa média e despesa unitária
-> são **colunas deste mart**, soma sobre soma, em **R$/m³** (÷1.000 no volume);
-> **não há 11º mart**. Nominais — deflacionar está **fora do escopo**.
+  | Limiar | Atípicos (2010–2021) | Queda do total de RN |
+  |---|---|---|
+  | R$ 500 | 394 | −40,7% |
+  | R$ 627 (p99,5 real) | 267 | −36,4% |
+  | **R$ 1.000 (D4, p99,8)** | **120** | **−29,0%** |
+
+  Os descritivos antigos da D4 (~290, p99,5, RN −36%) são o corte em **p99,5 =
+  R$ 627**; a regra fixada é **R$ 1.000** (120 atípicos, RN −29%).
+- **Anos:** 1995–2022 (robusto ≥ 2001).
+- **Fontes:** SNIS; **IBGE-DTB**; **IBGE-POP** (só para a flag `investimento_atipico`).
+- **Regra:** **R$ nominal** — nunca comparar anos sem correção (ressalva da ficha,
+  não há coluna constante). Os atípicos **permanecem** no total por UF (D4/D28).
+- **Pico de 2019 (D28, preservado sem correção):** 48 atípicos, **45 de RN**
+  (investimento total de RN em 2019 = **R$ 1,52 bi**, 5–30× os demais anos), 45
+  valores distintos — coerente com prestador regional único (CAERN), mas sem
+  coluna de prestador para confirmar; mantido como dado.
+- **Aceite (confirmado no SELECT, 2026-11-08):** **754 linhas** (= 27×28 − 2; sem
+  informante em **1996-AC** e **1996-PI**). PK `(ano, sigla_uf)` sem duplicatas;
+  dimensões DTB não nulas; **16 colunas**. Tarifa nacional **2,18 (2010) → 4,12
+  (2021)**; despesa unitária (DTS) **2,06 (2010) → 3,87 (2021)**;
+  `Σinvestimento_total` das 27 UFs em 2021 = **R$ 15.297.535.452,19** (total Brasil
+  2021); **120** municípios atípicos na janela (RN −29%). Extremos de tarifa/despesa
+  fora de [0,2; 20] R$/m³ só em **1995–2000** (nominais baixos no início da série),
+  nenhum no período robusto ≥ 2001 — preservados.
+
+> **D18/D22/D27 (fechado, verificado nos dados):** tarifa média (FN001) e despesa
+> unitária (**FN017 = DTS**) são **colunas deste mart**, soma sobre soma, em
+> **R$/m³** (÷1.000 no volume); **não há 11º mart**. Nominais — deflacionar está
+> **fora do escopo**.
 
 ---
 
@@ -509,25 +562,27 @@ município, aplicada a todos os anos do mart):
 |---|---|---|---|
 | `ano` | INTEGER | 2010–2021 | — |
 | `sigla_uf`, `nome_uf`, `nome_regiao` | VARCHAR | DTB | — |
-| `investimento_per_capita_com_sinalizados` | DECIMAL | `Σinvestimento_total_prestador / nullif(Σpopulacao_total_ibge,0)` — **todos** os municípios | R$/hab (nominal) |
-| `investimento_per_capita_sem_sinalizados` | DECIMAL | idem, **excluindo** os municípios com flag `prestador_regional_provavel` | R$/hab (nominal) |
+| `investimento_per_capita_com_atipicos` | DECIMAL | `Σinvestimento_total_prestador / nullif(Σpopulacao_total_ibge,0)` — **todos** os municípios | R$/hab (nominal) |
+| `investimento_per_capita_sem_atipicos` | DECIMAL | idem, **excluindo** os municípios com flag `investimento_atipico` | R$/hab (nominal) |
 | `municipios_informantes` | INTEGER | municípios com investimento e pop. IBGE não nulos | contagem |
-| `municipios_sinalizados` | INTEGER | municípios com a flag D4, por grão | contagem |
+| `municipios_investimento_atipico` | INTEGER | municípios com a flag D4/D28, por grão | contagem |
 | `valor_nominal` | BOOLEAN | sempre `true` | — |
 
-- **Regra D4 (prestador regional):** flag `prestador_regional_provavel` quando o
-  **investimento per capita do município > R$ 1.000/hab** (≈ p99,5 nacional). Os
-  sinalizados **permanecem** na coluna `…_com_sinalizados` (total fiel por UF) e
-  **saem** da coluna `…_sem_sinalizados`. **Nota de UF obrigatória:** destacar
-  **RN** (−36% do total se os sinalizados fossem excluídos; Verificação D4);
-  citar MA/SE/PE. Limiar como **constante nomeada** no SQL/executor.
+- **Regra D4/D28 (investimento atípico):** flag `investimento_atipico` quando o
+  **investimento per capita do município > R$ 1.000/hab** (limiar **nominal**;
+  = p99,8 com pop IBGE). **Mesma regra e mesmo nome do mart 5** (replicada
+  exatamente). Os atípicos **permanecem** na coluna `…_com_atipicos` (total fiel
+  por UF) e **saem** da coluna `…_sem_atipicos`. **Nota de UF obrigatória:**
+  destacar **RN** (−29% do total se os atípicos fossem excluídos; D28); citar
+  MA/SE/PE. Limiar como **constante nomeada** no SQL/executor. Hipótese de
+  prestador regional é **hipótese, não fato** (sem coluna de prestador na silver).
 - **Denominador:** **população total IBGE-POP** (per capita por habitante).
 - **Anos:** 2010–2021.
 - **Fontes:** SNIS (investimento); **IBGE-POP**; **IBGE-DTB**.
 - **Regra:** **R$ nominal** (R$/hab por ano, não comparável entre anos sem
   correção); teste de cobertura de junção antes do join.
-- **Aceite:** até **324 linhas** (27 × 12). `municipios_sinalizados` nacional
-  2010–2021 ≈ **290** (Verificação D4). Diferença entre as duas colunas é grande
+- **Aceite:** até **324 linhas** (27 × 12). `municipios_investimento_atipico`
+  nacional 2010–2021 = **120** (D28). Diferença entre as duas colunas é grande
   só em RN. **Chute a confirmar** o per capita por UF.
 
 ---
@@ -551,7 +606,7 @@ município, aplicada a todos os anos do mart):
 | `perdas_in049` | DECIMAL | IN049 do município (fórmula do mart 3) | % |
 | `investimento_per_capita` | DECIMAL | `investimento_total_prestador / nullif(populacao_total_ibge,0)` | R$/hab (nominal) |
 | `pib_per_capita` | DECIMAL | **`pib_municipio × 1000 / nullif(populacao_total_ibge,0)`** (D15: PIB em Mil Reais → **× 1000** converte para reais na gold) | R$/hab (nominal) |
-| `prestador_regional_provavel` | BOOLEAN | flag D4 (per capita > R$ 1.000/hab) | — |
+| `investimento_atipico` | BOOLEAN | flag D4/D28 (per capita > R$ 1.000/hab, nominal) | — |
 
 - **Regra D15 (conversão do PIB):** `pib_municipio` está em **Mil Reais** na
   silver (BIGINT). A conversão para reais acontece **só aqui**, com **comentário
@@ -561,8 +616,9 @@ município, aplicada a todos os anos do mart):
   **permanece no dado** e **não recebe transformação logarítmica** (log de ≤ 0 é
   indefinido) — nenhum filtro, nenhum clamp. Caso conhecido: Guamaré/RN
   (`2404507`) teve PIB negativo em 2012 (reavaliar em 2021 na carga).
-- **Regra D4:** excluir os sinalizados **apenas** de rankings per capita (coluna
-  `investimento_per_capita`), via a flag; mart 9 mantém a flag visível.
+- **Regra D4/D28:** excluir os atípicos **apenas** de rankings per capita (coluna
+  `investimento_per_capita`), via a flag `investimento_atipico`; mart 9 mantém a
+  flag visível.
 - **Anos:** **2021** (único ano com urbano válido + PIB).
 - **Fontes:** SNIS; **IBGE-PIB**; **IBGE-POP**.
 - **Aceite:** nº de linhas = municípios com SNIS urbano + PIB + população casados
@@ -621,11 +677,11 @@ Uma definição, uma fórmula e uma fonte por termo.
 | **Ano de referência** | 2021 nos marts urbanos (D2); não se usa 2022 neles. | D2 / [`decisoes.md`](decisoes.md). |
 | **Painel fixo** (regra D19 + D24) | **Regra (D19):** município com valor nas **colunas-chave** em **todos os 12 anos de 2010 a 2021**. **Cada família de índices aplica a regra às suas próprias colunas-chave (D24).** **Painel urbano de água** (colunas-chave `populacao_urbana_atendida_agua` e `populacao_urbana`) = **4.472 municípios** (Rodada 3.3), as 27 UFs, usado nos **marts 4 e 10**. **Painel de esgoto** (mart 2, D24): **coleta** (`volume_esgoto_coletado`, `volume_agua_consumido` > 0) = **1.473**; **tratamento** (`volume_esgoto_tratado`, `volume_esgoto_coletado` > 0) = **1.440** (painéis distintos). | silver SNIS; regra definida uma vez aqui. |
 | **Linha inconsistente (IN049)** | município com `(AG006+AG018−AG024) < AG010`. | excluída com flag (D3), contada por ano. |
-| **Prestador regional sinalizado** | município com investimento per capita > **R$ 1.000/hab** (≈ p99,5). | flag `prestador_regional_provavel` (D4). |
+| **Investimento atípico** (D4/D28) | município com investimento per capita > **R$ 1.000/hab** (nominal; = p99,8 com pop IBGE). | flag `investimento_atipico` (marts 5 e 8); hipótese de prestador regional é hipótese, não fato. |
 | **Perda de água** | IN049 = `(AG006+AG018−AG010−AG024)/(AG006+AG018−AG024)×100`. | SNIS (glossário 2022, D3). |
 | **Investimento per capita** | `investimento_total_prestador / populacao_total_ibge`. | SNIS/IBGE-POP; R$ nominal (D4/D14). |
 | **Tarifa média** (D22) | `Σreceita_operacional_direta / (Σ(volume_agua_faturado+volume_esgoto_faturado) × 1000)`, R$/m³ nominal. | SNIS (FN001 ÷ (AG011+ES007)). |
-| **Despesa unitária** (D22) | `Σdespesa_exploracao / (Σ(volume_agua_faturado+volume_esgoto_faturado) × 1000)`, R$/m³ nominal. | SNIS (FN017 ÷ (AG011+ES007)). |
+| **Despesa unitária** (D22/D27) | `Σdespesa_total_servico / (Σ(volume_agua_faturado+volume_esgoto_faturado) × 1000)`, R$/m³ nominal. | SNIS (**FN017 = DTS = `despesa_total_servico`** ÷ (AG011+ES007)) → IN003. `despesa_exploracao` é FN015/DEX. |
 | **Universo comum** (D22) | município com numerador e denominador não nulos **e denominador > 0**. | regra de `municipios_informantes` da tarifa/despesa unitária. |
 | **PIB per capita** | `pib_municipio × 1000 / populacao_total_ibge` (Mil Reais→reais na gold). | IBGE-PIB/IBGE-POP; nominal (D15). |
 | **Valor nominal** | R$ sem deflação; comparável **só no mesmo ano**. | flag `valor_nominal=true`. |
@@ -662,7 +718,7 @@ Mesma arquitetura dos executores existentes
    nº de linhas, nº de colunas** (ex.:
    `gold.atendimento_uf_ano · 324 linhas · 9 colunas`). Ao final, um bloco de
    **diagnóstico** (municípios fora de painel nos marts 4 e 10;
-   `municipios_sinalizados` D4; `linhas_inconsistentes_in049` D3).
+   `municipios_investimento_atipico` D4/D28; `linhas_inconsistentes_in049` D3).
 6. Idempotente (schema recriado), sem colunas de auditoria, `data/raw/` nunca
    tocado, silver nunca alterada (conexão de leitura sobre ela).
 
@@ -704,13 +760,16 @@ temporário** via `tmp_path_factory`, **monkeypatch de
 | `test_m1_exclusao_a2` | 1 | `linhas_excluidas_a2` > 0 só onde há violação (D5) |
 | `test_m2_28_anos` | 2 | 28 linhas (1995–2022) × 13 colunas; PK única; identidade informantes+excluídas=não nulos; painéis constantes (1.473/1.440) e NULL fora de 2010–2021; `serie_robusta` true ≥ 2006; índices ∈ [0,100] exceto `tratado > coletado` (D23) |
 | `test_m3_in049_nacional` | 3 | índice nacional 2010–2021 ∈ [35,41]% (D3); inconsistentes 0–57/ano |
-| `test_m4_painel_e_rank` | 4 | nº linhas = painel fixo único (4.472) menos A2; `posicao` sem buracos; sem coluna `quintil_variacao` (D21) |
-| `test_m5_total_br_2021` | 5 | `Σinvestimento_total` 27 UFs 2021 = R$ 15.297.535.452,19 |
-| `test_m5_tarifa_despesa_unitaria` | 5 | `tarifa_media` e `despesa_unitaria` presentes, soma sobre soma, ≥ 0 (D18) |
+| `test_m4_painel_e_rank` | 4 | 4.431 linhas (painel 4.472 − 41 A2); identidade 4.472=4.431+41; `posicao` 1..N única sem buracos; `posicao_empate` empates compartilham (mín. 1); `variacao_pp ∈ [−100,+100]`; 12 `variacao_extrema`; anos 2010/2021 (nunca 2022); sem `quintil_variacao` (D21, D26) |
+| `test_m5_linhas_e_total_br` | 5 | 754 linhas (27×28 − 2: sem 1996-AC/1996-PI); PK única; dims DTB não nulas; `Σinvestimento_total` 27 UFs 2021 = R$ 15.297.535.452,19 |
+| `test_m5_total_br_por_ano` | 5 | `investimento_total` Brasil por ano 2010–2021 (conferência cruzada mart 8) |
+| `test_m5_tarifa_despesa_unitaria` | 5 | tarifa 2,18 (2010)/4,12 (2021); despesa unitária (DTS/FN017) 2,06/3,87; conversão ÷1.000; soma sobre soma; ≥ 0 (D22/D27) |
+| `test_m5_identidades_informantes` | 5 | identidades informantes+excluídos=total (tarifa, despesa, índice), valores obrigatórios não nulos |
+| `test_m5_investimento_atipico` | 5 | 120 atípicos na janela; RN −29%; `investimento_total_sem_atipicos ≤ investimento_total` |
 | `test_m10_mesmo_painel_do_m4` | 10 | painel (4.472) idêntico ao do mart 4 (D19) |
 | `test_m6_faixas_2021` | 6 | 72 linhas (6×12); soma das faixas em 2021 = 5.570 |
 | `test_m7_absolutos` | 7 | 324 linhas; `habitantes_sem_*` ≥ 0 e ≤ pop. total |
-| `test_m8_flag_d4` | 8 | `municipios_sinalizados` nacional ≈ 290; duas colunas diferem em RN |
+| `test_m8_flag_d4` | 8 | `municipios_investimento_atipico` nacional = 120 (D28); duas colunas diferem em RN |
 | `test_m9_2021_pib` | 9 | 5.302 linhas; PIB per capita negativo preservado, sem log (D17) |
 | `test_m10_painel_quartis` | 10 | 8 linhas (4×2); `Σmunicipios_painel`/ano = 4.472 |
 | `test_executor_uma_tabela_por_arquivo` | — | critério 4 do executor (seção 4.1) |
@@ -738,8 +797,8 @@ Números que o MCP permitiu confirmar marcados **[confirmado]**; os demais são
 7. **`municipios_informantes` coerente com a silver:** a soma por ano do mart 1
    deve bater com a contagem de informantes urbanos da Rodada 3.2 (ex.: água
    urbana 2021 ≈ **5.302**) [confirmado parcialmente].
-8. **Sinalizados D4 (mart 8):** `Σmunicipios_sinalizados` 2010–2021 ≈ **290**
-   (Verificação D4) [a confirmar no SELECT].
+8. **Atípicos D4/D28 (marts 5 e 8):** `Σmunicipios_investimento_atipico`
+   2010–2021 = **120** (limiar R$ 1.000/hab; RN −29%) [confirmado no SELECT].
 
 **A definir na aula 4 (dashboard):**
 
@@ -817,8 +876,9 @@ D3, isso é um **conflito a listar** (reabrir D3), não a resolver aqui.
 - [ ] `tests/test_gold.py` — os testes da seção 5.
 - [ ] `executar.py` — gold como 6º passo (após cobertura).
 - [ ] `sql/gold/00_teste.sql` **apagado** após validar o executor.
-- [ ] comentário D15 (× 1000) nos marts 9 e 10; flag `valor_nominal` nos marts 5
-      e 8; nota de RN no mart 8.
+- [ ] comentário D15 (× 1000) nos marts 9 e 10; flag `valor_nominal` no mart 8
+      (mart 5 traz a ressalva nominal na ficha, sem coluna constante); nota de RN
+      nos marts 5 e 8; flag D4/D28 com o mesmo nome `investimento_atipico`.
 
 ---
 
@@ -840,11 +900,11 @@ D3, isso é um **conflito a listar** (reabrir D3), não a resolver aqui.
 | 1 | ~~soma de `municipios_informantes_agua` (≈5.302 em 2021)~~ **CONFIRMADO: 5.284 em 2021 (5.302 − 18 A2); 324 linhas; água BR 2021 = 93,33%** |
 | 2 | ~~perfil de `municipios_informantes` por ano~~ **CONFIRMADO: 28 linhas × 13 colunas; coleta 20→3.051, tratamento 19→2.897 (universo comum); índice coleta 2021≈56%, tratamento 2021≈80,3%; painéis esgoto 1.473 (coleta)/1.440 (tratamento); `serie_robusta` true ≥ 2006** |
 | 3 | ~~nº de linhas e inconsistentes~~ **CONFIRMADO: 754 linhas (756 − 2 pares iniciais); perdas ∈ [0; 94,48]; índice nacional 2010–21 = 37,42%; consumo per capita 2021 = 151,3 L/hab·dia (IN022, D25); `excluidas_consumo_acima` 0–57/ano; único extremo Vilhena/RO 1997** |
-| 4 | nº de linhas = painel fixo único (4.472) menos A2 |
-| 5 | nº de linhas (≤ 756) nos anos iniciais |
+| 4 | ~~nº de linhas = painel fixo único (4.472) menos A2~~ **CONFIRMADO: 4.431 linhas × 10 colunas = painel 4.472 − 41 A2 (26 em 2010, 16 em 2021); PK única; posicao 1..4.431 sem buracos; posicao_empate 1..4.429; variacao_pp ∈ [−100,+100]; 12 variacao_extrema; D26** |
+| 5 | ~~nº de linhas (≤ 756) nos anos iniciais~~ **CONFIRMADO: 754 linhas × 16 colunas (756 − 2: sem 1996-AC/1996-PI); PK única; tarifa 2,18→4,12; despesa unitária (DTS/FN017, D27) 2,06→3,87; investimento BR 2021 = R$ 15.297.535.452,19; 120 atípicos (D28, RN −29%); extremos de tarifa/despesa só em 1995–2000** |
 | 6 | perfil de cobertura por faixa |
 | 7 | `habitantes_sem_*` por UF |
-| 8 | per capita por UF; `municipios_sinalizados` (≈290) |
+| 8 | per capita por UF; `municipios_investimento_atipico` = 120 (D28) |
 | 9 | reavaliar PIB per capita negativo em 2021 (Guamaré/RN) |
 | 10 | distribuição exata dos quartis (empates no `ntile`) |
 
@@ -870,6 +930,8 @@ Restam apenas itens gerais de dicionário SNIS, que não bloqueiam a implementa�
 | Mart 9 (2021, SNIS urbano + PIB + pop casados) | 5.302 |
 | Mart 2 — anos com volumes | 28 (1995–2022) |
 | Investimento total Brasil 2021 (mart 5) | R$ 15.297.535.452,19 |
+| Mart 5 — linhas / tarifa 2010→2021 / despesa unit. DTS 2010→2021 | 754 / 2,18→4,12 / 2,06→3,87 R$/m³ |
+| Mart 5 — municípios atípicos 2010–2021 (R$ 1.000/hab, D28) | 120 (RN −29%; pico 2019 = 48, 45 em RN) |
 
 ## 12. Consultas MCP usadas (referência)
 

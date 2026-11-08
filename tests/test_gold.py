@@ -700,3 +700,365 @@ def test_m3_extremo_vilhena_1997_preservado(gold_db):
     assert consumo is not None and pop is not None and consumo > pop
     assert pc_ro_1997 > 1000
     assert absurdos == 1
+
+
+# ---------------------------------------------------------------------------
+# Mart 4 — gold.ranking_atendimento_variacao (spec-gold.md §2, D19/D5/D21/D26)
+# ---------------------------------------------------------------------------
+
+M4 = "gold.ranking_atendimento_variacao"
+
+# Expectativas confirmadas no MCP/SELECT (2026-11-08).
+M4_PAINEL = 4_472  # painel fixo único (D19), 12 anos não nulos
+M4_EXCLUIDOS_A2 = 41  # A2 em 2010 ou 2021 entre membros do painel (D5)
+M4_LINHAS = M4_PAINEL - M4_EXCLUIDOS_A2  # 4.431 ranqueados
+M4_COLUNAS = 10
+M4_EXTREMAS = 12  # |variacao_pp| > 80 pp
+
+
+def test_m4_linhas_pk_identidade(gold_db):
+    """4.431 linhas × 10 colunas; PK (id_municipio) única; identidade D5.
+
+    Painel fixo único (4.472) = ranqueados (4.431) + excluídos por A2 (41).
+    O painel e as exclusões são reconstruídos da silver, independentes do mart.
+    """
+    con = _ro(gold_db)
+    try:
+        linhas = con.execute(f"SELECT count(*) FROM {M4}").fetchone()[0]
+        colunas = con.execute(
+            "SELECT count(*) FROM duckdb_columns() WHERE schema_name = 'gold' "
+            "AND table_name = 'ranking_atendimento_variacao'"
+        ).fetchone()[0]
+        dup = con.execute(
+            f"SELECT count(*) FROM (SELECT 1 FROM {M4} "
+            "GROUP BY id_municipio HAVING count(*) > 1)"
+        ).fetchone()[0]
+        # painel e A2 reconstruídos da silver (fonte independente do mart)
+        painel, a2 = con.execute(
+            """
+            WITH painel AS (
+              SELECT id_municipio FROM silver.municipio_agua_esgoto
+              WHERE ano BETWEEN 2010 AND 2021
+                AND populacao_urbana_atendida_agua IS NOT NULL
+                AND populacao_urbana IS NOT NULL
+              GROUP BY id_municipio HAVING count(DISTINCT ano) = 12
+            ),
+            a2 AS (
+              SELECT DISTINCT s.id_municipio
+              FROM silver.municipio_agua_esgoto s
+              JOIN painel p ON p.id_municipio = s.id_municipio
+              WHERE s.ano IN (2010, 2021)
+                AND s.populacao_urbana_atendida_agua > s.populacao_urbana
+            )
+            SELECT (SELECT count(*) FROM painel), (SELECT count(*) FROM a2)
+            """
+        ).fetchone()
+    finally:
+        con.close()
+    assert (linhas, colunas) == (M4_LINHAS, M4_COLUNAS)
+    assert dup == 0
+    assert (painel, a2) == (M4_PAINEL, M4_EXCLUIDOS_A2)
+    assert painel == linhas + a2  # 4.472 = 4.431 + 41
+
+
+def test_m4_posicao_sem_buracos(gold_db):
+    """D26: posicao 1..N única e sem buracos (row_number)."""
+    con = _ro(gold_db)
+    try:
+        pmin, pmax, distintas, n = con.execute(
+            f"SELECT min(posicao), max(posicao), count(DISTINCT posicao), count(*) "
+            f"FROM {M4}"
+        ).fetchone()
+    finally:
+        con.close()
+    assert pmin == 1
+    assert pmax == M4_LINHAS
+    assert distintas == M4_LINHAS
+    assert n == M4_LINHAS
+
+
+def test_m4_posicao_empate_coerente(gold_db):
+    """D26: posicao_empate (rank) — empates compartilham o valor; mínimo 1.
+
+    Onde variacao_pp é igual, posicao_empate é igual; o mínimo é 1 e há menos
+    valores distintos que linhas (há empates reais).
+    """
+    con = _ro(gold_db)
+    try:
+        pe_min = con.execute(f"SELECT min(posicao_empate) FROM {M4}").fetchone()[0]
+        # dentro de cada valor de variacao_pp, posicao_empate é único
+        incoerentes = con.execute(
+            f"SELECT count(*) FROM (SELECT 1 FROM {M4} "
+            "GROUP BY variacao_pp HAVING count(DISTINCT posicao_empate) > 1)"
+        ).fetchone()[0]
+        distintas, n = con.execute(
+            f"SELECT count(DISTINCT posicao_empate), count(*) FROM {M4}"
+        ).fetchone()
+    finally:
+        con.close()
+    assert pe_min == 1
+    assert incoerentes == 0
+    assert distintas < n  # há empates reais (ex.: muitos a +0 e a +100 pp)
+
+
+def test_m4_variacao_faixa(gold_db):
+    """variacao_pp ∈ [−100, +100] e = cobertura_2021 − cobertura_2010."""
+    con = _ro(gold_db)
+    try:
+        fora = con.execute(
+            f"SELECT count(*) FROM {M4} WHERE variacao_pp NOT BETWEEN -100 AND 100"
+        ).fetchone()[0]
+        divergentes = con.execute(
+            f"SELECT count(*) FROM {M4} "
+            "WHERE abs(variacao_pp - (cobertura_2021 - cobertura_2010)) > 1e-6"
+        ).fetchone()[0]
+    finally:
+        con.close()
+    assert fora == 0
+    assert divergentes == 0
+
+
+def test_m4_variacao_extrema(gold_db):
+    """variacao_extrema verdadeira exatamente onde |variacao_pp| > 80 (12 casos)."""
+    con = _ro(gold_db)
+    try:
+        n_extrema = con.execute(
+            f"SELECT count(*) FROM {M4} WHERE variacao_extrema"
+        ).fetchone()[0]
+        incoerentes = con.execute(
+            f"SELECT count(*) FROM {M4} "
+            "WHERE variacao_extrema <> (abs(variacao_pp) > 80)"
+        ).fetchone()[0]
+    finally:
+        con.close()
+    assert n_extrema == M4_EXTREMAS
+    assert incoerentes == 0
+
+
+def test_m4_anos_fixos_nunca_2022(gold_db):
+    """D2/D19: cobertura reconstruída usa só 2010 e 2021; 2022 nunca entra.
+
+    O mart não traz coluna de ano (grão = município), então a prova é que as
+    coberturas batem com a silver de 2010/2021 e que nenhum membro do painel
+    depende de 2022 (o painel exige os 12 anos 2010–2021).
+    """
+    con = _ro(gold_db)
+    try:
+        # cobertura_2010 e cobertura_2021 do mart batem com a silver desses anos
+        divergentes = con.execute(
+            """
+            WITH esperado AS (
+              SELECT id_municipio,
+                100.0 * max(CASE WHEN ano = 2010 THEN populacao_urbana_atendida_agua END)
+                  / nullif(max(CASE WHEN ano = 2010 THEN populacao_urbana END), 0) AS c10,
+                100.0 * max(CASE WHEN ano = 2021 THEN populacao_urbana_atendida_agua END)
+                  / nullif(max(CASE WHEN ano = 2021 THEN populacao_urbana END), 0) AS c21
+              FROM silver.municipio_agua_esgoto
+              WHERE ano IN (2010, 2021)
+              GROUP BY id_municipio
+            )
+            SELECT count(*) FROM gold.ranking_atendimento_variacao m
+            JOIN esperado e ON e.id_municipio = m.id_municipio
+            WHERE abs(m.cobertura_2010 - e.c10) > 1e-6
+               OR abs(m.cobertura_2021 - e.c21) > 1e-6
+            """
+        ).fetchone()[0]
+    finally:
+        con.close()
+    assert divergentes == 0
+
+
+# ===========================================================================
+# Mart 5 — gold.financeiro_uf_ano (spec-gold.md §2, ficha Mart 5; D22/D27/D28)
+# Expectativas confirmadas no SELECT/MCP (somente leitura, 2026-11-08).
+# ===========================================================================
+
+M5 = "gold.financeiro_uf_ano"
+
+M5_LINHAS = 754  # 27 UF × 28 anos − 2 (sem informante em 1996-AC e 1996-PI)
+M5_COLUNAS = 16
+M5_UFS = 27
+M5_ANOS = 28
+# Investimento total do Brasil por ano (R$ nominal) — conferência cruzada mart 8.
+M5_INV_BR_POR_ANO = {
+    2010: 7_672_158_349.94,
+    2011: 7_085_417_183.19,
+    2012: 8_122_015_347.98,
+    2013: 9_052_433_064.27,
+    2014: 10_672_877_749.33,
+    2015: 10_333_746_833.61,
+    2016: 10_330_283_909.77,
+    2017: 9_726_560_670.98,
+    2018: 10_959_142_821.54,
+    2019: 14_245_200_322.09,
+    2020: 12_195_430_301.88,
+    2021: 15_297_535_452.19,
+}
+M5_INV_BR_2021 = 15_297_535_452.19
+# Série nacional ponderada (soma sobre soma), R$/m³ (D22/D27).
+M5_TARIFA_2010, M5_TARIFA_2021 = 2.18, 4.12
+M5_DESP_UNIT_2010, M5_DESP_UNIT_2021 = 2.06, 3.87  # DTS/FN017 (IN003), não DEX
+# Investimento atípico (D4/D28): limiar R$ 1.000/hab, janela 2010–2021.
+M5_ATIPICOS_TOTAL = 120
+M5_RN_QUEDA_PCT = 29.0  # −29% do total de RN se os atípicos saíssem
+
+
+def test_m5_linhas_pk_e_total_br(gold_db):
+    """754 linhas (756 − 2); PK única; dims DTB não nulas; invest. BR 2021."""
+    con = _ro(gold_db)
+    try:
+        linhas, ufs, anos, colunas = con.execute(
+            f"SELECT count(*), count(DISTINCT sigla_uf), count(DISTINCT ano), "
+            "(SELECT count(*) FROM duckdb_columns() WHERE schema_name='gold' "
+            "AND table_name='financeiro_uf_ano') "
+            f"FROM {M5}"
+        ).fetchone()
+        dups = con.execute(
+            f"SELECT count(*) FROM (SELECT ano, sigla_uf FROM {M5} "
+            "GROUP BY ano, sigla_uf HAVING count(*) > 1)"
+        ).fetchone()[0]
+        nulos = con.execute(
+            f"SELECT count(*) FROM {M5} WHERE ano IS NULL OR sigla_uf IS NULL "
+            "OR nome_uf IS NULL OR nome_regiao IS NULL"
+        ).fetchone()[0]
+        inv_2021 = con.execute(
+            f"SELECT sum(investimento_total) FROM {M5} WHERE ano = 2021"
+        ).fetchone()[0]
+    finally:
+        con.close()
+    assert (linhas, ufs, anos, colunas) == (M5_LINHAS, M5_UFS, M5_ANOS, M5_COLUNAS)
+    assert dups == 0
+    assert nulos == 0
+    assert round(float(inv_2021), 2) == M5_INV_BR_2021
+
+
+def test_m5_total_br_por_ano(gold_db):
+    """Investimento total do Brasil por ano 2010–2021 (conferência mart 8)."""
+    con = _ro(gold_db)
+    try:
+        linhas = con.execute(
+            f"SELECT ano, sum(investimento_total) FROM {M5} "
+            "WHERE ano BETWEEN 2010 AND 2021 GROUP BY ano ORDER BY ano"
+        ).fetchall()
+    finally:
+        con.close()
+    obtido = {ano: round(float(tot), 2) for ano, tot in linhas}
+    assert obtido == M5_INV_BR_POR_ANO
+
+
+def test_m5_tarifa_despesa_unitaria(gold_db):
+    """Tarifa (FN001) e despesa unitária (FN017/DTS) nacionais, R$/m³.
+
+    Soma sobre soma com a conversão de unidade (volume em 1.000 m³/ano -> ÷1.000).
+    Reconstrói o nacional pela silver e compara com a série da ficha (D22/D27).
+    """
+    con = _ro(gold_db)
+    try:
+        tarifa_2010, desp_2010 = con.execute(
+            """
+            SELECT
+              sum(receita_operacional_direta) FILTER (WHERE vf > 0)
+                / (nullif(sum(vf) FILTER (WHERE receita_operacional_direta IS NOT NULL), 0) * 1000.0),
+              sum(despesa_total_servico) FILTER (WHERE vf > 0)
+                / (nullif(sum(vf) FILTER (WHERE despesa_total_servico IS NOT NULL), 0) * 1000.0)
+            FROM (SELECT *, coalesce(volume_agua_faturado,0)+coalesce(volume_esgoto_faturado,0) AS vf
+                  FROM silver.municipio_agua_esgoto WHERE ano = 2010)
+            """
+        ).fetchone()
+        tarifa_2021, desp_2021 = con.execute(
+            """
+            SELECT
+              sum(receita_operacional_direta) FILTER (WHERE vf > 0)
+                / (nullif(sum(vf) FILTER (WHERE receita_operacional_direta IS NOT NULL), 0) * 1000.0),
+              sum(despesa_total_servico) FILTER (WHERE vf > 0)
+                / (nullif(sum(vf) FILTER (WHERE despesa_total_servico IS NOT NULL), 0) * 1000.0)
+            FROM (SELECT *, coalesce(volume_agua_faturado,0)+coalesce(volume_esgoto_faturado,0) AS vf
+                  FROM silver.municipio_agua_esgoto WHERE ano = 2021)
+            """
+        ).fetchone()
+        negativos = con.execute(
+            f"SELECT count(*) FROM {M5} WHERE tarifa_media < 0 OR despesa_unitaria < 0"
+        ).fetchone()[0]
+    finally:
+        con.close()
+    assert round(float(tarifa_2010), 2) == M5_TARIFA_2010
+    assert round(float(tarifa_2021), 2) == M5_TARIFA_2021
+    assert round(float(desp_2010), 2) == M5_DESP_UNIT_2010
+    assert round(float(desp_2021), 2) == M5_DESP_UNIT_2021
+    # despesa unitária (DTS) fica abaixo da tarifa — confirma o FN017 (operação ~equilíbrio)
+    assert M5_DESP_UNIT_2021 < M5_TARIFA_2021
+    assert negativos == 0
+
+
+def test_m5_identidades_informantes(gold_db):
+    """Identidade informantes + excluídos (den ≤ 0) = total com valor não nulo.
+
+    Para tarifa, despesa e índice, por (ano, UF): a contagem de informantes do
+    mart iguala a reconstrução pela silver (num e den não nulos e den > 0), e
+    nunca excede o total de linhas com o valor obrigatório não nulo.
+    """
+    con = _ro(gold_db)
+    try:
+        divergentes = con.execute(
+            f"""
+            WITH s AS (
+              SELECT ano, sigla_uf,
+                receita_operacional_direta AS fn001,
+                despesa_total_servico AS dts,
+                coalesce(volume_agua_faturado,0)+coalesce(volume_esgoto_faturado,0) AS vf
+              FROM silver.municipio_agua_esgoto
+            ),
+            esperado AS (
+              SELECT ano, sigla_uf,
+                count(*) FILTER (WHERE fn001 IS NOT NULL AND vf > 0) AS inf_tarifa,
+                count(*) FILTER (WHERE dts   IS NOT NULL AND vf > 0) AS inf_despesa,
+                count(*) FILTER (WHERE fn001 IS NOT NULL) AS fn001_nn,
+                count(*) FILTER (WHERE dts   IS NOT NULL) AS dts_nn
+              FROM s GROUP BY ano, sigla_uf
+            )
+            SELECT count(*)
+            FROM {M5} m JOIN esperado e ON e.ano = m.ano AND e.sigla_uf = m.sigla_uf
+            WHERE m.municipios_informantes_tarifa  <> e.inf_tarifa
+               OR m.municipios_informantes_despesa <> e.inf_despesa
+               OR m.municipios_informantes_tarifa  > e.fn001_nn
+               OR m.municipios_informantes_despesa > e.dts_nn
+            """
+        ).fetchone()[0]
+        obrig_nulos = con.execute(
+            f"SELECT count(*) FROM {M5} WHERE "
+            "(municipios_informantes_tarifa > 0 AND (tarifa_media IS NULL OR receita_operacional_direta IS NULL)) "
+            "OR (municipios_informantes_despesa > 0 AND (despesa_unitaria IS NULL OR despesa_total_servicos IS NULL))"
+        ).fetchone()[0]
+    finally:
+        con.close()
+    assert divergentes == 0
+    assert obrig_nulos == 0
+
+
+def test_m5_investimento_atipico(gold_db):
+    """D4/D28: 120 atípicos na janela; RN −29%; sem_atipicos ≤ total."""
+    con = _ro(gold_db)
+    try:
+        atipicos = con.execute(
+            f"SELECT sum(municipios_investimento_atipico) FROM {M5} "
+            "WHERE ano BETWEEN 2010 AND 2021"
+        ).fetchone()[0]
+        fora_janela = con.execute(
+            f"SELECT coalesce(sum(municipios_investimento_atipico), 0) FROM {M5} "
+            "WHERE ano NOT BETWEEN 2010 AND 2021"
+        ).fetchone()[0]
+        viola = con.execute(
+            f"SELECT count(*) FROM {M5} "
+            "WHERE investimento_total_sem_atipicos > investimento_total"
+        ).fetchone()[0]
+        rn_com, rn_sem = con.execute(
+            f"SELECT sum(investimento_total), sum(investimento_total_sem_atipicos) "
+            f"FROM {M5} WHERE sigla_uf = 'RN' AND ano BETWEEN 2010 AND 2021"
+        ).fetchone()
+    finally:
+        con.close()
+    assert atipicos == M5_ATIPICOS_TOTAL
+    assert fora_janela == 0
+    assert viola == 0
+    queda = 100.0 * (1 - float(rn_sem) / float(rn_com))
+    assert round(queda, 1) == M5_RN_QUEDA_PCT

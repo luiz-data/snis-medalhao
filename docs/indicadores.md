@@ -129,9 +129,13 @@ IBGE abaixo usa um ID daquele catálogo**.
 
 - **Pergunta:** quanto se investe e se gasta por UF e ano (valores nominais)?
 - **Grão:** ano × UF (+ região via IBGE-DTB).
-- **Fórmula:** agregados por UF/ano de `sum(investimento_total_prestador)` e
-  `sum(despesa_exploracao)`; indicadores derivados como razões do mesmo ano
-  (ex. `sum(despesa_exploracao)/sum(receita_operacional_direta)`).
+- **Fórmula:** agregados por UF/ano de `sum(investimento_total_prestador)`,
+  `sum(despesa_total_servico)` (**FN017/DTS**) e `sum(despesa_exploracao)`
+  (**FN015/DEX**); indicadores derivados como razões do mesmo ano
+  (ex. `sum(despesa_total_servico)/sum(receita_operacional_direta)`). **D27:** a
+  `despesa_unitaria` (IN003) usa **FN017 = `despesa_total_servico`**, não a DEX;
+  tarifa média (IN004) = `receita_operacional_direta` (FN001) ÷ (AG011+ES007),
+  em R$/m³ (÷1.000 no volume).
 - **Denominador:** quando houver razão, **mesmo ano e mesmo universo SNIS**.
 - **Ano(s) de referência:** 1995–2022 (presentes em 2022).
 - **Fontes:** SNIS; **IBGE-DTB** (UF e região).
