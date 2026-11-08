@@ -137,9 +137,11 @@ está marcado **"chute a confirmar"** (roteiro da aula 3).
 | `nome_regiao` | VARCHAR | macrorregião (DTB) | — |
 | `cobertura_urbana_agua` | DECIMAL | `Σpopulacao_urbana_atendida_agua / nullif(Σpopulacao_urbana,0) × 100` | % |
 | `cobertura_urbana_esgoto` | DECIMAL | `Σpopulacao_urbana_atendida_esgoto / nullif(Σpopulacao_urbana_residente_esgoto,0) × 100` | % |
-| `municipios_informantes_agua` | INTEGER | municípios com num. e den. de água não nulos | contagem |
+| `municipios_informantes_agua` | INTEGER | municípios com num. e den. de água não nulos **e** fora da exclusão A2 (entram no cálculo) | contagem |
 | `municipios_informantes_esgoto` | INTEGER | idem esgoto | contagem |
-| `linhas_excluidas_a2` | INTEGER | municípios-linha excluídos pela flag A2 (D5), por grão | contagem |
+| `excluidas_a2_agua` | INTEGER | municípios-linha excluídos pela flag A2 de **água** (D5), por grão; `municipios_informantes_agua + excluidas_a2_agua` = municípios com água não nula | contagem |
+| `excluidas_a2_esgoto` | INTEGER | idem para **esgoto**; fecha a identidade com `municipios_informantes_esgoto` | contagem |
+| `linhas_excluidas_a2` | INTEGER | municípios-linha excluídos pela flag A2 em **água OU esgoto** (D5), por grão | contagem |
 
 - **Denominador:** urbano SNIS (`populacao_urbana`; esgoto usa
   `populacao_urbana_residente_esgoto`).
@@ -149,11 +151,35 @@ está marcado **"chute a confirmar"** (roteiro da aula 3).
   `populacao_urbana_atendida_agua > populacao_urbana` (e o par de esgoto), **com
   flag** e **sem clamp**; contar as excluídas por grão em `linhas_excluidas_a2`.
   Impacto nacional ≤ 0,17 pp (Verificação D5).
-- **Aceite:** **324 linhas** = 27 UFs × 12 anos (confirmado no MCP para
-  2010–2021; a regra é "uma linha por UF-ano com algum informante"). Cobertura
-  urbana de água nacional 2021 ≈ **93,4%** (baseline D5); cada cobertura em
-  [0, 100]. **Chute a confirmar:** `municipios_informantes_agua` somado em 2021 ≈
-  **5.302** (conferido no MCP).
+- **Aceite (confirmado no SELECT, 2026-11-08):** **324 linhas** = 27 UFs × 12
+  anos (PK `(ano, sigla_uf)` sem duplicatas; dimensões DTB não nulas). Cada
+  cobertura em [0, 100] (medido: água [35,46; 100,0], esgoto [4,99; 97,03]).
+  Cobertura urbana de água nacional **2021 = 93,33%** (baseline D5 ≈ 93,4% ✓).
+  `municipios_informantes_agua` somado em **2021 = 5.284** — são **5.302** sem a
+  D5 **menos 18 exclusões A2 de água** (a DTB cobre 100% dos informantes; o join
+  não derruba nenhum). 11 colunas.
+- **Exclusões A2 por ano (D5), confirmadas no SELECT** (água / esgoto / água OU
+  esgoto):
+
+  | ano | água | esgoto | total (A2) |
+  |---|---|---|---|
+  | 2010 | 26 | 2 | 28 |
+  | 2011 | 35 | 3 | 37 |
+  | 2012 | 22 | 5 | 27 |
+  | 2013 | 3 | 0 | 3 |
+  | 2014 | 3 | 0 | 3 |
+  | 2015 | 1 | 2 | 3 |
+  | 2016 | 43 | 7 | 49 |
+  | 2017 | 7 | 0 | 7 |
+  | 2018 | 1 | 0 | 1 |
+  | 2019 | 7 | 0 | 7 |
+  | 2020 | 6 | 0 | 6 |
+  | 2021 | 18 | 7 | 24 |
+
+  Exclusões de água por ano ≤ 43 (máx. 2016), coerente com a conferência C6
+  (≤ ~43 em água). Identidade verificada:
+  `municipios_informantes_agua + excluidas_a2_agua` = municípios com água não
+  nula no grão (idem esgoto).
 
 ---
 
@@ -164,25 +190,72 @@ está marcado **"chute a confirmar"** (roteiro da aula 3).
 - **Chave primária:** `(ano)`. **FKs:** SNIS por `(ano, id_municipio)`. **Sem
   dimensão territorial** (único mart 100% SNIS, D1).
 
-**Colunas:**
+**Colunas (13):**
 
 | Coluna | Tipo | Descrição | Unidade |
 |---|---|---|---|
 | `ano` | INTEGER | 1995–2022 | — |
-| `indice_coleta_esgoto` | DECIMAL | `Σvolume_esgoto_coletado / nullif(Σvolume_agua_consumido,0) × 100` | % |
-| `indice_tratamento_esgoto` | DECIMAL | `Σvolume_esgoto_tratado / nullif(Σvolume_esgoto_coletado,0) × 100` | % |
-| `municipios_informantes_coleta` | INTEGER | municípios com os dois volumes de coleta não nulos | contagem |
-| `municipios_informantes_tratamento` | INTEGER | idem tratamento | contagem |
+| `indice_coleta_esgoto` | DECIMAL | `Σvolume_esgoto_coletado / nullif(Σvolume_agua_consumido,0) × 100` (coletado ÷ água consumida — **não** IN046; universo comum den > 0) | % |
+| `indice_tratamento_esgoto` | DECIMAL | **IN016**: `Σvolume_esgoto_tratado / nullif(Σvolume_esgoto_coletado,0) × 100` (tratado ÷ **coletado**; universo comum den > 0) | % |
+| `indice_coleta_painel` | DECIMAL | mesmo índice de coleta só no **painel de esgoto-coleta** (D24, 1.473 mun.); **NULL fora de 2010–2021** | % |
+| `indice_tratamento_painel` | DECIMAL | mesmo índice de tratamento só no **painel de esgoto-tratamento** (D24, 1.440 mun.); **NULL fora de 2010–2021** | % |
+| `municipios_informantes_coleta` | INTEGER | universo comum da coleta: coletado e consumido não nulos **e consumido > 0** | contagem |
+| `municipios_informantes_tratamento` | INTEGER | universo comum do tratamento: tratado e coletado não nulos **e coletado > 0** | contagem |
+| `municipios_painel_coleta` | INTEGER | municípios do painel de coleta por ano (constante **1.473** em 2010–2021; **NULL fora**) | contagem |
+| `municipios_painel_tratamento` | INTEGER | municípios do painel de tratamento por ano (constante **1.440** em 2010–2021; **NULL fora**) | contagem |
+| `excluidas_den_zero_coleta` | INTEGER | coletado e consumido não nulos mas **consumido = 0** (fora do universo comum) | contagem |
+| `excluidas_den_zero_tratamento` | INTEGER | tratado e coletado não nulos mas **coletado = 0** (fora do universo comum) | contagem |
+| `municipios_tratado_acima_coletado` | INTEGER | **diagnóstico**: `tratado > coletado` (NÃO excluído — ver ressalva) | contagem |
+| `serie_robusta` | BOOLEAN | `municipios_informantes_coleta > 1000` → **true de 2006 em diante** (R3) | — |
 
 - **Denominador:** volume SNIS (água consumida para coleta; esgoto coletado para
-  tratamento) — mesmo universo volume/volume.
+  tratamento) — mesmo universo volume/volume, **soma sobre soma**, den > 0.
+- **Identidade (D23):** `municipios_informantes_* + excluidas_den_zero_* =
+  municípios com os dois volumes não nulos` (por coluna e por ano).
 - **Anos:** **1995–2022** (volumes presentes em 2022); **robusto a partir de
-  2006** (cobertura de esgoto só passa de 1.000 municípios em 2006, Rodada 3.2).
+  2006** (`volume_esgoto_coletado` só passa de 1.000 informantes em **2006 =
+  1.218**, investigacao-silver.md). Nenhum ano é excluído; os frágeis ficam
+  marcados por `serie_robusta = false`.
 - **Fontes:** SNIS.
-- **Aceite:** **28 linhas** (1995–2022, confirmado no MCP). Cada índice ≥ 0;
-  pode passar de 100 em anos frágeis (esgoto importado/exportado — ressalva da
-  ficha). **Chute a confirmar:** `municipios_informantes_tratamento` cresce de
-  ~26 (1995) para ~3.057 (2022) (Rodada 3.2).
+
+**Ressalva de composição e painel (D23/D24):** a série por ano dos índices "de
+todos os informantes" **mistura efeito de composição** (os informantes mudam de
+ano para ano). A **tendência** deve ser lida pelas colunas de **painel**
+(conjunto fixo). Os painéis de esgoto têm **1.473** (coleta) e **1.440**
+(tratamento) municípios, contra **4.472** do painel de água (D19) — **não são
+representativos do Brasil** (só municípios que informam esgoto em todos os anos
+de 2010–2021). Logo, as colunas de painel servem para ler a **tendência**, não o
+**nível** nacional, e **não devem ser comparadas em nível** com os índices de
+todos os informantes.
+
+**Ressalva `tratado > coletado` (D23):** não é excluído do índice — é esgoto
+**importado** para tratamento (município trata mais do que coleta); por isso
+`indice_tratamento_esgoto` **pode passar de 100** em anos/recortes frágeis. A
+contagem fica exposta em `municipios_tratado_acima_coletado`.
+
+**Anomalias de 1995–2005 (erro de dado preservado sem correção):** nos anos
+frágeis um único município domina o numerador da coleta e dispara o índice acima
+de 1.500%:
+
+| ano | município | UF | coletado | consumido | razão | % do numerador |
+|---|---|---|---|---|---|---|
+| 1998 | Fortaleza (2304400) | CE | 47.452.063 | 94.163 | 504× | 88,9% |
+| 1999 | Recife (2611606) | PE | 29.071.968 | 30.683 | 948× | 52,7% |
+
+São os **dois valores máximos** de `volume_esgoto_coletado` (erro de escala/
+dígito no bruto, não esgoto importado — nenhuma cidade coleta 500–950× o que
+consome). **Preservados sem correção** (a silver espelha; o mart não altera
+dado) e **isolados por `serie_robusta = false`** (ambos < 2006).
+
+- **Aceite (confirmado no SELECT/MCP, 2026-11-08):** **28 linhas** (1995–2022) ×
+  **13 colunas**; PK `(ano)` sem duplicatas; índices "de todos" não nulos (den >
+  0). `municipios_informantes_coleta` cresce de **20 (1995)** a **3.051 (2022)**;
+  `municipios_informantes_tratamento` de **19 (1995)** a **2.897 (2022)**
+  (universo comum den > 0; os ~3.057 "ambos não nulos" de 2022 incluem 160 com
+  `coletado = 0`). Índice de coleta recente ~**56% (2021)**; tratamento sobre
+  coletado **80,3% (2021)** (nível oficial SNIS ~80% ✓). Painel: coleta
+  **60,90 → 55,89** e tratamento **69,37 → 85,18** (2010 → 2021), contagens
+  constantes **1.473 / 1.440**.
 
 ---
 
@@ -516,7 +589,7 @@ Uma definição, uma fórmula e uma fonte por termo.
 | **População de referência** | população **residente total** do município (urbana+rural), ref. 1º/jul (D14). | `populacao_total_ibge` (IBGE-POP). |
 | **População urbana** | subconjunto urbano autodeclarado ao SNIS. | `populacao_urbana` (SNIS). Distinta da de referência. |
 | **Ano de referência** | 2021 nos marts urbanos (D2); não se usa 2022 neles. | D2 / [`decisoes.md`](decisoes.md). |
-| **Painel fixo** (único, D19) | **um** conjunto nomeado: municípios com `populacao_urbana_atendida_agua` e `populacao_urbana` não nulos em **todos os 12 anos de 2010 a 2021** = **4.472 municípios** (Rodada 3.3), as 27 UFs. **Usado nos marts 4 e 10** (não há dois painéis). | silver SNIS; definido uma vez aqui. |
+| **Painel fixo** (regra D19 + D24) | **Regra (D19):** município com valor nas **colunas-chave** em **todos os 12 anos de 2010 a 2021**. **Cada família de índices aplica a regra às suas próprias colunas-chave (D24).** **Painel urbano de água** (colunas-chave `populacao_urbana_atendida_agua` e `populacao_urbana`) = **4.472 municípios** (Rodada 3.3), as 27 UFs, usado nos **marts 4 e 10**. **Painel de esgoto** (mart 2, D24): **coleta** (`volume_esgoto_coletado`, `volume_agua_consumido` > 0) = **1.473**; **tratamento** (`volume_esgoto_tratado`, `volume_esgoto_coletado` > 0) = **1.440** (painéis distintos). | silver SNIS; regra definida uma vez aqui. |
 | **Linha inconsistente (IN049)** | município com `(AG006+AG018−AG024) < AG010`. | excluída com flag (D3), contada por ano. |
 | **Prestador regional sinalizado** | município com investimento per capita > **R$ 1.000/hab** (≈ p99,5). | flag `prestador_regional_provavel` (D4). |
 | **Perda de água** | IN049 = `(AG006+AG018−AG010−AG024)/(AG006+AG018−AG024)×100`. | SNIS (glossário 2022, D3). |
@@ -599,7 +672,7 @@ temporário** via `tmp_path_factory`, **monkeypatch de
 |---|---|---|
 | `test_m1_linhas_e_cobertura` | 1 | 324 linhas (27×12); cobertura ∈ [0,100]; água nacional 2021 ≈ 93,4% |
 | `test_m1_exclusao_a2` | 1 | `linhas_excluidas_a2` > 0 só onde há violação (D5) |
-| `test_m2_28_anos` | 2 | 28 linhas (1995–2022); índices ≥ 0 |
+| `test_m2_28_anos` | 2 | 28 linhas (1995–2022) × 13 colunas; PK única; identidade informantes+excluídas=não nulos; painéis constantes (1.473/1.440) e NULL fora de 2010–2021; `serie_robusta` true ≥ 2006; índices ∈ [0,100] exceto `tratado > coletado` (D23) |
 | `test_m3_in049_nacional` | 3 | índice nacional 2010–2021 ∈ [35,41]% (D3); inconsistentes 0–57/ano |
 | `test_m4_painel_e_rank` | 4 | nº linhas = painel fixo único (4.472) menos A2; `posicao` sem buracos; sem coluna `quintil_variacao` (D21) |
 | `test_m5_total_br_2021` | 5 | `Σinvestimento_total` 27 UFs 2021 = R$ 15.297.535.452,19 |
@@ -733,8 +806,8 @@ D3, isso é um **conflito a listar** (reabrir D3), não a resolver aqui.
 
 | Mart | O que falta confirmar no SELECT |
 |---|---|
-| 1 | soma de `municipios_informantes_agua` (≈5.302 em 2021) |
-| 2 | perfil de `municipios_informantes` por ano |
+| 1 | ~~soma de `municipios_informantes_agua` (≈5.302 em 2021)~~ **CONFIRMADO: 5.284 em 2021 (5.302 − 18 A2); 324 linhas; água BR 2021 = 93,33%** |
+| 2 | ~~perfil de `municipios_informantes` por ano~~ **CONFIRMADO: 28 linhas × 13 colunas; coleta 20→3.051, tratamento 19→2.897 (universo comum); índice coleta 2021≈56%, tratamento 2021≈80,3%; painéis esgoto 1.473 (coleta)/1.440 (tratamento); `serie_robusta` true ≥ 2006** |
 | 3 | nº de linhas (≤ 756) e inconsistentes por ano (0–57) |
 | 4 | nº de linhas = painel fixo único (4.472) menos A2 |
 | 5 | nº de linhas (≤ 756) nos anos iniciais |
