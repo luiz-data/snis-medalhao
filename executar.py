@@ -6,6 +6,7 @@ Uso: uv run python executar.py
 
 from pipeline.db import CAMINHO_BANCO
 from pipeline.ingestao import main as ingestao
+from pipeline.transformacao import main as transformacao
 
 
 def main():
@@ -18,7 +19,11 @@ def main():
     # --- bronze ---
     ingestao()
 
-    # --- silver e gold entram nas próximas etapas ---
+    # --- silver ---
+    print()
+    transformacao()
+
+    # --- gold entra nas próximas etapas ---
 
 
 if __name__ == "__main__":
