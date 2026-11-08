@@ -1,0 +1,808 @@
+# Spec da camada gold (silver → gold · 10 marts)
+
+| | |
+|---|---|
+| **Status** | aprovada, aguardando implementação — **só documentação** (nenhum código, SQL ou dado criado) |
+| **Versão** | 2 (aplica D18–D21) |
+| **Data** | 2026-11-08 |
+| **Responsável** | Luiz |
+| **Banco** | `snis.duckdb` · schema `gold` (novo) |
+| **Origem** | `silver.municipio_agua_esgoto` + `silver.ibge_populacao_municipio` + `silver.ibge_pib_municipio` + `silver.ibge_dtb_municipio` (tudo somente leitura) |
+| **Destino** | schema `gold`, uma tabela `gold.<nome_do_mart>` por arquivo `sql/gold/NN_nome.sql` |
+
+> **Leitura obrigatória antes de implementar:** [`indicadores.md`](indicadores.md)
+> (fórmulas e grão dos 10 marts), [`decisoes.md`](decisoes.md) (**D1–D21,
+> todas APROVADAS em 2026-11-08**; D18–D21 são as decisões da gold), [`fontes-ibge.md`](fontes-ibge.md) (catálogo
+> e IDs de fonte), [`investigacao-silver.md`](investigacao-silver.md) (Rodada 3 e
+> Verificação das decisões — os números de referência vêm daqui),
+> [`spec-transformacao.md`](spec-transformacao.md) e [`spec-ibge.md`](spec-ibge.md)
+> (contratos da silver que a gold herda). Modelo conceitual: **aula 3 do curso
+> Olist** ("marts"), adaptada para **gold** (schema `gold`, arquivos
+> `sql/gold/NN_nome.sql`, executor `pipeline/gold.py`), com o roteiro
+> **"grão → chute → SELECT → arquivo"**.
+
+Esta spec é **só documentação**. Não cria código, nem SQL, nem altera dados,
+specs existentes ou `data/raw/`. Sem internet. Sem commit. Os fatos numéricos
+foram conferidos no `snis.duckdb` via **MCP somente leitura** (seção 12 lista as
+consultas usadas); onde o número final só aparece depois do SELECT validado, a
+regra está escrita e marcada **"chute a confirmar"**.
+
+---
+
+## 0. Objetivo
+
+A gold entrega as **tabelas de análise** (marts) que respondem às perguntas de
+negócio de [`indicadores.md`](indicadores.md). Cada mart é **uma tabela**,
+gerada por **um arquivo SQL**, materializada no schema `gold`. A gold é a **única
+camada** onde se calcula indicador, se pondera índice, se faz recorte temporal e
+se converte unidade (a silver só tipa e espelha — ver
+[`spec-transformacao.md`](spec-transformacao.md)).
+
+---
+
+## 1. Fundamentos e convenções
+
+### 1.1 Schema, pasta e nomes de arquivo
+
+- Schema de saída: **`gold`**.
+- Pasta dos SQL: **`sql/gold/`**.
+- **Um SQL por mart**, nomeado `NN_nome.sql` (01 a 10), gerando **exatamente uma**
+  tabela `gold.<nome>` (o `<nome>` é o do mart em [`indicadores.md`](indicadores.md)):
+
+| Arquivo | Tabela gold | Grão | Fontes (IDs) |
+|---|---|---|---|
+| `01_atendimento_uf_ano.sql` | `gold.atendimento_uf_ano` | ano × UF | SNIS, IBGE-DTB |
+| `02_esgoto_coleta_tratamento_ano.sql` | `gold.esgoto_coleta_tratamento_ano` | ano (Brasil) | SNIS |
+| `03_perdas_consumo_uf_ano.sql` | `gold.perdas_consumo_uf_ano` | ano × UF | SNIS, IBGE-DTB |
+| `04_ranking_atendimento_variacao.sql` | `gold.ranking_atendimento_variacao` | município (2 anos fixos) | SNIS, IBGE-DTB |
+| `05_financeiro_uf_ano.sql` | `gold.financeiro_uf_ano` | ano × UF | SNIS, IBGE-DTB |
+| `06_atendimento_porte_ano.sql` | `gold.atendimento_porte_ano` | ano × faixa de porte | SNIS, IBGE-POP |
+| `07_populacao_sem_servico_uf_ano.sql` | `gold.populacao_sem_servico_uf_ano` | ano × UF | IBGE-POP, SNIS, IBGE-DTB |
+| `08_investimento_per_capita_uf_ano.sql` | `gold.investimento_per_capita_uf_ano` | ano × UF | SNIS, IBGE-POP, IBGE-DTB |
+| `09_atendimento_vs_pib_2021.sql` | `gold.atendimento_vs_pib_2021` | município (2021) | SNIS, IBGE-PIB, IBGE-POP |
+| `10_avanco_por_renda_painel.sql` | `gold.avanco_por_renda_painel` | quartil × 2 anos | SNIS, IBGE-PIB, IBGE-POP |
+
+> `sql/gold/00_teste.sql` (`SELECT 1 AS x`) existe **só** para validar o executor
+> e é **apagado** depois (seção 9.4). Ele não é um mart.
+
+### 1.2 Regras globais (herdadas das decisões e da silver)
+
+1. **Índices sempre `sum(numerador)/sum(denominador)`** por grão — nunca
+   `avg()` de uma coluna `indice_*`. Numerador e denominador do **mesmo universo**
+   (água com água, urbano com urbano, volume com volume). Regra de
+   [`indicadores.md`](indicadores.md).
+2. **`municipios_informantes`** em todo mart por ano/grão: nº de municípios com
+   numerador **e** denominador não nulos naquele grão (definição no glossário,
+   seção 3).
+3. **Valores em R$ são nominais** → só comparar **dentro do mesmo ano**. Toda
+   coluna monetária/per capita carrega a flag **`valor_nominal = true`**. Nenhuma
+   comparação inter-anual de R$ sem deflator (não há deflator no projeto).
+4. **Comparação entre anos só com painel fixo declarado** (municípios presentes
+   nos dois anos com dado não nulo). Marts 4 e 10 o exigem; nenhum outro compara
+   anos.
+5. **`CAST` estrito herdado da silver**: a silver já é tipada
+   ([`spec-transformacao.md`](spec-transformacao.md) §3); a gold não reconverte
+   texto. Divisões usam **`/ nullif(den, 0)`** para nunca dividir por zero.
+6. **Ano de referência 2021 nos marts urbanos** (1, 4, 9, 10) — **D2**; nenhum
+   mart urbano usa 2022 (população urbana autodeclarada 100% nula em 2022).
+7. **Janela 2010–2021** para tudo que usa o IBGE (D1, catálogo; limite da série
+   do PIB). Marts 6, 7, 8, 9, 10.
+8. **Dimensão territorial** (UF, nome da UF, macrorregião) vem **sempre de
+   `silver.ibge_dtb_municipio`** (`sigla_uf`, `nome_uf`, `nome_regiao`), por
+   junção em `id_municipio` — **nunca** de seed e **nunca** da `sigla_uf` do SNIS
+   (esta serve só de conferência; ver teste em
+   [`tests/test_ibge_silver.py`](../tests/test_ibge_silver.py)).
+
+### 1.3 Universo dos denominadores (D14)
+
+| Denominador | Coluna | Quando usar |
+|---|---|---|
+| **População urbana SNIS** | `populacao_urbana` (água), `populacao_urbana_residente_esgoto` (esgoto) | coberturas **urbanas** (marts 1, 4, 10) |
+| **População total IBGE** | `populacao_total_ibge` (IBGE-POP; residente total, ref. 1º/jul, D14) | per capita e coberturas sobre o **total** (marts 6, 7, 8, 9, 10-quartil) |
+| **Volume SNIS** | `volume_agua_produzido`, `volume_agua_consumido`, `volume_esgoto_coletado` | perdas e esgoto (marts 2, 3) |
+| **População atendida SNIS** | `populacao_atendida_agua` | consumo per capita (mart 3) |
+
+**`populacao_total_ibge` (IBGE) ≠ `populacao_urbana` (SNIS)** — são medidas
+distintas (D14); nunca misturar numerador de um universo com denominador do
+outro.
+
+---
+
+## 2. Fichas dos 10 marts
+
+Cada ficha responde **as três perguntas** (pergunta de negócio · grão · chaves),
+dá **colunas + fórmulas exatas**, **regras específicas** das decisões, e os
+**critérios de aceite**. Onde o número só se conhece depois do SELECT validado,
+está marcado **"chute a confirmar"** (roteiro da aula 3).
+
+> **Convenção de fórmula:** `Σx` = `sum(x)` no grão da linha; toda razão é
+> `Σnum / nullif(Σden, 0)`. "× 100" quando o indicador é percentual.
+
+---
+
+### Mart 1 — `gold.atendimento_uf_ano`
+
+- **Pergunta:** qual % da população **urbana** tem água e esgoto, por UF e ano?
+- **Grão:** uma linha = **(ano, UF)**. Região anexada pela DTB.
+- **Chave primária:** `(ano, sigla_uf)`. **FKs:** SNIS por `(ano, id_municipio)`;
+  DTB por `id_municipio` → `sigla_uf`, `nome_uf`, `nome_regiao`.
+
+**Colunas:**
+
+| Coluna | Tipo | Descrição | Unidade |
+|---|---|---|---|
+| `ano` | INTEGER | ano de referência (2010–2021; D2) | — |
+| `sigla_uf` | VARCHAR | UF (DTB) | — |
+| `nome_uf` | VARCHAR | nome da UF (DTB) | — |
+| `nome_regiao` | VARCHAR | macrorregião (DTB) | — |
+| `cobertura_urbana_agua` | DECIMAL | `Σpopulacao_urbana_atendida_agua / nullif(Σpopulacao_urbana,0) × 100` | % |
+| `cobertura_urbana_esgoto` | DECIMAL | `Σpopulacao_urbana_atendida_esgoto / nullif(Σpopulacao_urbana_residente_esgoto,0) × 100` | % |
+| `municipios_informantes_agua` | INTEGER | municípios com num. e den. de água não nulos | contagem |
+| `municipios_informantes_esgoto` | INTEGER | idem esgoto | contagem |
+| `linhas_excluidas_a2` | INTEGER | municípios-linha excluídos pela flag A2 (D5), por grão | contagem |
+
+- **Denominador:** urbano SNIS (`populacao_urbana`; esgoto usa
+  `populacao_urbana_residente_esgoto`).
+- **Anos:** 2010–2021 (**2021** é o ano de referência de destaque, D2).
+- **Fontes:** SNIS; **IBGE-DTB** (UF/região).
+- **Regra D5 (violação A2):** excluir do cálculo as linhas
+  `populacao_urbana_atendida_agua > populacao_urbana` (e o par de esgoto), **com
+  flag** e **sem clamp**; contar as excluídas por grão em `linhas_excluidas_a2`.
+  Impacto nacional ≤ 0,17 pp (Verificação D5).
+- **Aceite:** **324 linhas** = 27 UFs × 12 anos (confirmado no MCP para
+  2010–2021; a regra é "uma linha por UF-ano com algum informante"). Cobertura
+  urbana de água nacional 2021 ≈ **93,4%** (baseline D5); cada cobertura em
+  [0, 100]. **Chute a confirmar:** `municipios_informantes_agua` somado em 2021 ≈
+  **5.302** (conferido no MCP).
+
+---
+
+### Mart 2 — `gold.esgoto_coleta_tratamento_ano`
+
+- **Pergunta:** quanto do esgoto é coletado e tratado no Brasil, por ano?
+- **Grão:** uma linha = **(ano)**, Brasil.
+- **Chave primária:** `(ano)`. **FKs:** SNIS por `(ano, id_municipio)`. **Sem
+  dimensão territorial** (único mart 100% SNIS, D1).
+
+**Colunas:**
+
+| Coluna | Tipo | Descrição | Unidade |
+|---|---|---|---|
+| `ano` | INTEGER | 1995–2022 | — |
+| `indice_coleta_esgoto` | DECIMAL | `Σvolume_esgoto_coletado / nullif(Σvolume_agua_consumido,0) × 100` | % |
+| `indice_tratamento_esgoto` | DECIMAL | `Σvolume_esgoto_tratado / nullif(Σvolume_esgoto_coletado,0) × 100` | % |
+| `municipios_informantes_coleta` | INTEGER | municípios com os dois volumes de coleta não nulos | contagem |
+| `municipios_informantes_tratamento` | INTEGER | idem tratamento | contagem |
+
+- **Denominador:** volume SNIS (água consumida para coleta; esgoto coletado para
+  tratamento) — mesmo universo volume/volume.
+- **Anos:** **1995–2022** (volumes presentes em 2022); **robusto a partir de
+  2006** (cobertura de esgoto só passa de 1.000 municípios em 2006, Rodada 3.2).
+- **Fontes:** SNIS.
+- **Aceite:** **28 linhas** (1995–2022, confirmado no MCP). Cada índice ≥ 0;
+  pode passar de 100 em anos frágeis (esgoto importado/exportado — ressalva da
+  ficha). **Chute a confirmar:** `municipios_informantes_tratamento` cresce de
+  ~26 (1995) para ~3.057 (2022) (Rodada 3.2).
+
+---
+
+### Mart 3 — `gold.perdas_consumo_uf_ano`
+
+- **Pergunta:** quanto de água se perde na distribuição e quanto cada pessoa
+  consome, por UF e ano?
+- **Grão:** uma linha = **(ano, UF)**.
+- **Chave primária:** `(ano, sigla_uf)`. **FKs:** SNIS `(ano, id_municipio)`;
+  DTB `id_municipio` → UF/região.
+
+**Colunas:**
+
+| Coluna | Tipo | Descrição | Unidade |
+|---|---|---|---|
+| `ano` | INTEGER | 1995–2022 | — |
+| `sigla_uf`, `nome_uf`, `nome_regiao` | VARCHAR | dimensão territorial (DTB) | — |
+| `indice_perdas_in049` | DECIMAL | fórmula completa do IN049 (abaixo) | % |
+| `consumo_per_capita` | DECIMAL | `Σvolume_agua_consumido × 1000 / nullif(Σpopulacao_atendida_agua × 365, 0)` | L/hab·dia |
+| `municipios_informantes_perdas` | INTEGER | municípios com AG006 e AG010 não nulos | contagem |
+| `municipios_informantes_consumo` | INTEGER | municípios com volume consumido e pop. atendida não nulos | contagem |
+| `linhas_inconsistentes_in049` | INTEGER | municípios excluídos pela salvaguarda (D3), por grão | contagem |
+
+- **Fórmula D3 (IN049 completo, glossário SNIS 2022):**
+  `Σ(AG006 + AG018 − AG010 − AG024) / nullif(Σ(AG006 + AG018 − AG024), 0) × 100`,
+  com `AG006 = volume_agua_produzido`, `AG018 = volume_agua_tratada_importado`,
+  `AG010 = volume_agua_consumido`, `AG024 = volume_servico_agua`. **AG018 e AG024
+  majoritariamente nulos → `coalesce(…, 0)`**; exigir **AG006 e AG010 não nulos**.
+- **Salvaguarda D3 (exclusão com flag):** excluir as linhas **inconsistentes**
+  `(AG006 + AG018 − AG024) < AG010` e contá-las por grão em
+  `linhas_inconsistentes_in049`. Impacto ≤ 0,15 pp no nacional, **0 UFs** mudam
+  > 5 pp (Verificação D3 revisada) — é **só salvaguarda**, não a regra decisiva.
+- **Denominador:** perdas → volume disponibilizado SNIS; consumo → população
+  atendida SNIS (`populacao_atendida_agua`, **não** IBGE).
+- **Anos:** 1995–2022 (robusto ≥ 2001).
+- **Fontes:** SNIS; **IBGE-DTB**.
+- **Aceite:** até **27 UFs × 28 anos = 756 linhas** (menos nos anos iniciais, que
+  não têm todas as UFs; **chute a confirmar** via SELECT). Índice nacional
+  ponderado 2010–2021 ≈ **36–39%** (nível oficial ~40%, Verificação D3): sanidade
+  obrigatória. Inconsistentes por ano na janela: **0–57** (Verificação D3).
+
+---
+
+### Mart 4 — `gold.ranking_atendimento_variacao`
+
+- **Pergunta:** quais municípios mais melhoraram ou pioraram no atendimento
+  urbano de água entre **dois anos fixos**?
+- **Grão:** uma linha = **município** (do painel fixo), com a variação entre os
+  dois anos.
+- **Chave primária:** `(id_municipio)`. **FKs:** SNIS `(ano, id_municipio)` nos
+  dois anos; DTB `id_municipio` → UF/região.
+
+**Anos fixos e painel (D19):** **ano_inicio = 2010, ano_fim = 2021** (nunca
+2022). Usa o **painel fixo único** do glossário (seção 3) — **4.472 municípios**
+com `populacao_urbana_atendida_agua` e `populacao_urbana` não nulos em **todos os
+12 anos de 2010 a 2021** (confirmado no MCP), as 27 UFs. **Mesmo painel do mart
+10** (D19: um único painel, não dois). Municípios **fora do painel** não entram
+no ranking e são **contados** numa linha de diagnóstico do executor (não viram
+linha do mart).
+
+**Colunas:**
+
+| Coluna | Tipo | Descrição | Unidade |
+|---|---|---|---|
+| `id_municipio` | VARCHAR | município (painel) | — |
+| `sigla_uf`, `nome_uf`, `nome_regiao` | VARCHAR | DTB | — |
+| `cobertura_2010` | DECIMAL | `populacao_urbana_atendida_agua/nullif(populacao_urbana,0) × 100` em 2010 | % |
+| `cobertura_2021` | DECIMAL | idem em 2021 | % |
+| `variacao_pp` | DECIMAL | `cobertura_2021 − cobertura_2010` | pontos percentuais |
+| `posicao` | INTEGER | `rank() OVER (ORDER BY variacao_pp DESC)` | — |
+
+- **Regra D21:** o mart traz **só** o ranking (`posicao`) e a variação em pontos
+  percentuais (`variacao_pp`); **sem `quintil_variacao`**.
+- **Regra D5:** aplicar a exclusão A2 por município-ano (um município com
+  violação em 2010 ou 2021 sai do painel, com flag no diagnóstico).
+- **Fórmula:** cobertura **por município** em cada ano (não ponderar — é 1
+  município por linha); variação = ano_fim − ano_início; `rank()` sobre a
+  variação (window function; roteiro `CTE` + `lag()`/`rank()`).
+- **Aceite:** nº de linhas = **painel fixo único (4.472)** menos os excluídos por
+  A2 (**chute a confirmar** após o SELECT com a exclusão aplicada).
+  `municipios_informantes` = o próprio painel. `posicao` sem buracos de 1 a N.
+
+---
+
+### Mart 5 — `gold.financeiro_uf_ano`
+
+- **Pergunta:** quanto se investe e se gasta por UF e ano (valores **nominais**)?
+- **Grão:** uma linha = **(ano, UF)**.
+- **Chave primária:** `(ano, sigla_uf)`. **FKs:** SNIS `(ano, id_municipio)`;
+  DTB `id_municipio` → UF/região.
+
+**Colunas:**
+
+| Coluna | Tipo | Descrição | Unidade |
+|---|---|---|---|
+| `ano` | INTEGER | 1995–2022 | — |
+| `sigla_uf`, `nome_uf`, `nome_regiao` | VARCHAR | DTB | — |
+| `investimento_total` | DECIMAL | `Σinvestimento_total_prestador` | R$ (nominal) |
+| `despesa_exploracao` | DECIMAL | `Σdespesa_exploracao` | R$ (nominal) |
+| `receita_operacional_direta` | DECIMAL | `Σreceita_operacional_direta` | R$ (nominal) |
+| `indice_despesa_sobre_receita` | DECIMAL | `Σdespesa_exploracao / nullif(Σreceita_operacional_direta,0) × 100` (mesmo ano) | % |
+| `tarifa_media` | DECIMAL | **D18/D22:** `Σreceita_operacional_direta / (nullif(Σ(volume_agua_faturado+volume_esgoto_faturado),0) × 1000)` — soma sobre soma (FN001 ÷ (AG011+ES007)) | R$/m³ (nominal) |
+| `despesa_unitaria` | DECIMAL | **D18/D22:** `Σdespesa_exploracao / (nullif(Σ(volume_agua_faturado+volume_esgoto_faturado),0) × 1000)` — soma sobre soma (FN017 ÷ (AG011+ES007)) | R$/m³ (nominal) |
+| `municipios_informantes_investimento` | INTEGER | municípios com investimento não nulo | contagem |
+| `municipios_informantes_tarifa` | INTEGER | **D22:** municípios com numerador e denom. de faturamento não nulos e **denom. > 0** (universo comum) | contagem |
+| `valor_nominal` | BOOLEAN | sempre `true` | — |
+
+- **Denominador:** razões só **dentro do mesmo ano e universo SNIS**.
+- **Regra D18/D22 (verificada nos dados):** **tarifa média** e **despesa
+  unitária** são **colunas deste mart** (não um 11º mart), soma sobre soma. O
+  denominador comum é `volume_agua_faturado + volume_esgoto_faturado`
+  (AG011+ES007). **Unidade R$/m³:** o volume vem em **1.000 m³/ano**, então a
+  conversão **divide por 1.000** (`× 1000` no denominador) — com **comentário
+  explícito no SQL**. **Universo comum** (`municipios_informantes_tarifa`):
+  numerador e denominador não nulos **e denominador > 0**. Confirmação: identidade
+  FN001 fecha 100% e a série nacional 2010–2021 vai de **R$ 2,18 → 4,12/m³**
+  (tarifa) — ver seção "Verificação de despesa unitária e tarifa média" de
+  [`investigacao-silver.md`](investigacao-silver.md).
+- **Anos:** 1995–2022 (robusto ≥ 2001).
+- **Fontes:** SNIS; **IBGE-DTB**.
+- **Regra:** **R$ nominal** — nunca comparar anos sem correção; flag
+  `valor_nominal = true`. Sedes de prestador regional **permanecem** no total por
+  UF (D4; a flag per capita só afeta marts 8 e 9).
+- **Aceite:** até **27 × 28 = 756 linhas** (menos nos anos iniciais; **chute a
+  confirmar**). Conferência cruzada: `Σinvestimento_total` das 27 UFs em 2021 =
+  **R$ 15.297.535.452,19** (total Brasil 2021, confirmado no MCP; ver seção 11).
+
+> **D18/D22 (fechado, verificado nos dados):** tarifa média e despesa unitária
+> são **colunas deste mart**, soma sobre soma, em **R$/m³** (÷1.000 no volume);
+> **não há 11º mart**. Nominais — deflacionar está **fora do escopo**.
+
+---
+
+### Mart 6 — `gold.atendimento_porte_ano`
+
+- **Pergunta:** como variam as coberturas de água e esgoto por **faixa de porte**
+  populacional do município?
+- **Grão:** uma linha = **(ano, faixa_porte)**.
+- **Chave primária:** `(ano, faixa_porte)`. **FKs:** SNIS `(ano, id_municipio)`;
+  IBGE-POP `(ano, id_municipio)` → `populacao_total_ibge`.
+
+**Faixas de porte (D16), medidas pela população IBGE de 2021** (fixa por
+município, aplicada a todos os anos do mart):
+
+| `faixa_porte` | Limite (hab.) | Nº de municípios (2021, MCP) |
+|---|---|---|
+| `1_ate_5mil` | < 5.000 | 1.250 |
+| `2_5a20mil` | 5.000–19.999 | 2.520 |
+| `3_20a50mil` | 20.000–49.999 | 1.120 |
+| `4_50a100mil` | 50.000–99.999 | 354 |
+| `5_100a500mil` | 100.000–499.999 | 277 |
+| `6_acima500mil` | ≥ 500.000 | 49 |
+| **total** | | **5.570** |
+
+**Colunas:**
+
+| Coluna | Tipo | Descrição | Unidade |
+|---|---|---|---|
+| `ano` | INTEGER | 2010–2021 (janela IBGE) | — |
+| `faixa_porte` | VARCHAR | uma das 6 faixas (porte fixado em 2021, D16) | — |
+| `cobertura_agua` | DECIMAL | `Σpopulacao_atendida_agua / nullif(Σpopulacao_total_ibge,0) × 100` | % |
+| `cobertura_esgoto` | DECIMAL | `Σpopulacao_atendida_esgoto / nullif(Σpopulacao_total_ibge,0) × 100` | % |
+| `municipios_informantes_agua` | INTEGER | municípios com atendido água e pop. IBGE não nulos | contagem |
+| `municipios_informantes_esgoto` | INTEGER | idem esgoto | contagem |
+
+- **Denominador:** **população total IBGE-POP**; a **faixa** também é da
+  população IBGE 2021 do município.
+- **Anos:** 2010–2021.
+- **Fontes:** SNIS (atendidos); **IBGE-POP** (população total e porte).
+- **Regra:** exige **teste de cobertura de junção** SNIS×IBGE antes do join (já
+  rodado em [`pipeline/cobertura.py`](../pipeline/cobertura.py)); numerador
+  (atendidos SNIS) e denominador (população total IBGE) são de universos
+  distintos → coberturas < 100% são esperadas.
+- **Aceite:** **6 faixas × 12 anos = 72 linhas** (menos se alguma faixa-ano ficar
+  vazia — improvável). Soma de municípios das 6 faixas em 2021 = **5.570**
+  (confirmado no MCP). Cobertura de água cresce com o porte (**chute a
+  confirmar** o perfil exato).
+
+---
+
+### Mart 7 — `gold.populacao_sem_servico_uf_ano`
+
+- **Pergunta:** quantos habitantes, em números absolutos, estão sem esgoto
+  coletado e sem água, por UF?
+- **Grão:** uma linha = **(ano, UF)**.
+- **Chave primária:** `(ano, sigla_uf)`. **FKs:** SNIS `(ano, id_municipio)`;
+  IBGE-POP `(ano, id_municipio)`; DTB `id_municipio` → UF/região.
+
+**Colunas:**
+
+| Coluna | Tipo | Descrição | Unidade |
+|---|---|---|---|
+| `ano` | INTEGER | 2010–2021 | — |
+| `sigla_uf`, `nome_uf`, `nome_regiao` | VARCHAR | DTB | — |
+| `habitantes_sem_agua` | BIGINT | `Σ greatest(populacao_total_ibge − populacao_atendida_agua, 0)` por município | habitantes |
+| `habitantes_sem_esgoto` | BIGINT | `Σ greatest(populacao_total_ibge − populacao_atendida_esgoto, 0)` por município | habitantes |
+| `municipios_informantes_agua` | INTEGER | municípios com pop. IBGE e atendido água não nulos | contagem |
+| `municipios_informantes_esgoto` | INTEGER | idem esgoto | contagem |
+
+- **Denominador:** não é razão — **diferença absoluta** entre população total
+  IBGE-POP e atendida SNIS; `greatest(…, 0)` **por município** (revisões de série
+  podem dar atendido > total).
+- **Anos:** 2010–2021.
+- **Fontes:** **IBGE-POP**; SNIS; **IBGE-DTB**.
+- **Aceite:** até **27 × 12 = 324 linhas**. Conferência: `Σhabitantes_sem_agua`
+  nacional ≤ população total do Brasil no ano; **chute a confirmar** o valor por
+  UF após o SELECT.
+
+---
+
+### Mart 8 — `gold.investimento_per_capita_uf_ano`
+
+- **Pergunta:** quanto se investe por habitante, por UF e ano?
+- **Grão:** uma linha = **(ano, UF)**.
+- **Chave primária:** `(ano, sigla_uf)`. **FKs:** SNIS `(ano, id_municipio)`;
+  IBGE-POP `(ano, id_municipio)`; DTB `id_municipio` → UF/região.
+
+**Colunas:**
+
+| Coluna | Tipo | Descrição | Unidade |
+|---|---|---|---|
+| `ano` | INTEGER | 2010–2021 | — |
+| `sigla_uf`, `nome_uf`, `nome_regiao` | VARCHAR | DTB | — |
+| `investimento_per_capita_com_sinalizados` | DECIMAL | `Σinvestimento_total_prestador / nullif(Σpopulacao_total_ibge,0)` — **todos** os municípios | R$/hab (nominal) |
+| `investimento_per_capita_sem_sinalizados` | DECIMAL | idem, **excluindo** os municípios com flag `prestador_regional_provavel` | R$/hab (nominal) |
+| `municipios_informantes` | INTEGER | municípios com investimento e pop. IBGE não nulos | contagem |
+| `municipios_sinalizados` | INTEGER | municípios com a flag D4, por grão | contagem |
+| `valor_nominal` | BOOLEAN | sempre `true` | — |
+
+- **Regra D4 (prestador regional):** flag `prestador_regional_provavel` quando o
+  **investimento per capita do município > R$ 1.000/hab** (≈ p99,5 nacional). Os
+  sinalizados **permanecem** na coluna `…_com_sinalizados` (total fiel por UF) e
+  **saem** da coluna `…_sem_sinalizados`. **Nota de UF obrigatória:** destacar
+  **RN** (−36% do total se os sinalizados fossem excluídos; Verificação D4);
+  citar MA/SE/PE. Limiar como **constante nomeada** no SQL/executor.
+- **Denominador:** **população total IBGE-POP** (per capita por habitante).
+- **Anos:** 2010–2021.
+- **Fontes:** SNIS (investimento); **IBGE-POP**; **IBGE-DTB**.
+- **Regra:** **R$ nominal** (R$/hab por ano, não comparável entre anos sem
+  correção); teste de cobertura de junção antes do join.
+- **Aceite:** até **324 linhas** (27 × 12). `municipios_sinalizados` nacional
+  2010–2021 ≈ **290** (Verificação D4). Diferença entre as duas colunas é grande
+  só em RN. **Chute a confirmar** o per capita por UF.
+
+---
+
+### Mart 9 — `gold.atendimento_vs_pib_2021`
+
+- **Pergunta:** como cobertura, perdas e investimento se relacionam com o **PIB
+  per capita** do município em **2021**?
+- **Grão:** uma linha = **município**, ano fixo = **2021**.
+- **Chave primária:** `(id_municipio)`. **FKs:** SNIS, IBGE-PIB, IBGE-POP, todos
+  em `(2021, id_municipio)`; DTB `id_municipio` → UF/região.
+
+**Colunas:**
+
+| Coluna | Tipo | Descrição | Unidade |
+|---|---|---|---|
+| `id_municipio` | VARCHAR | município | — |
+| `sigla_uf`, `nome_uf`, `nome_regiao` | VARCHAR | DTB | — |
+| `cobertura_urbana_agua` | DECIMAL | `populacao_urbana_atendida_agua/nullif(populacao_urbana,0) × 100` | % |
+| `cobertura_urbana_esgoto` | DECIMAL | `populacao_urbana_atendida_esgoto/nullif(populacao_urbana_residente_esgoto,0) × 100` | % |
+| `perdas_in049` | DECIMAL | IN049 do município (fórmula do mart 3) | % |
+| `investimento_per_capita` | DECIMAL | `investimento_total_prestador / nullif(populacao_total_ibge,0)` | R$/hab (nominal) |
+| `pib_per_capita` | DECIMAL | **`pib_municipio × 1000 / nullif(populacao_total_ibge,0)`** (D15: PIB em Mil Reais → **× 1000** converte para reais na gold) | R$/hab (nominal) |
+| `prestador_regional_provavel` | BOOLEAN | flag D4 (per capita > R$ 1.000/hab) | — |
+
+- **Regra D15 (conversão do PIB):** `pib_municipio` está em **Mil Reais** na
+  silver (BIGINT). A conversão para reais acontece **só aqui**, com **comentário
+  explícito no SQL** (`-- D15: PIB em Mil Reais; × 1000 = reais`). Sanidade: SP
+  (3550308) 2021 `pib_municipio` = 828.980.747 Mil Reais ≈ R$ 828,98 bi.
+- **Regra D17 (PIB per capita negativo):** se `pib_per_capita < 0`, ele
+  **permanece no dado** e **não recebe transformação logarítmica** (log de ≤ 0 é
+  indefinido) — nenhum filtro, nenhum clamp. Caso conhecido: Guamaré/RN
+  (`2404507`) teve PIB negativo em 2012 (reavaliar em 2021 na carga).
+- **Regra D4:** excluir os sinalizados **apenas** de rankings per capita (coluna
+  `investimento_per_capita`), via a flag; mart 9 mantém a flag visível.
+- **Anos:** **2021** (único ano com urbano válido + PIB).
+- **Fontes:** SNIS; **IBGE-PIB**; **IBGE-POP**.
+- **Aceite:** nº de linhas = municípios com SNIS urbano + PIB + população casados
+  em 2021 = **5.302** (confirmado no MCP, água urbana). Correlação ≠ causalidade
+  (nota do dashboard).
+
+---
+
+### Mart 10 — `gold.avanco_por_renda_painel`
+
+- **Pergunta:** o atendimento avançou mais entre 2010 e 2021 em municípios de
+  **maior ou menor renda**?
+- **Grão:** uma linha = **(quartil_pib, ano)**, com **ano ∈ {2010, 2021}**, sobre
+  um **painel fixo** de municípios.
+- **Chave primária:** `(quartil_pib, ano)`. **FKs:** SNIS, IBGE-PIB, IBGE-POP.
+
+**Painel e quartis (D19):** usa o **painel fixo único** do glossário (seção 3) —
+**4.472 municípios** não nulos em `populacao_urbana_atendida_agua` e
+`populacao_urbana` nos **12 anos** 2010–2021 (confirmado no MCP), as 27 UFs,
+**o mesmo do mart 4**. **Quartil de renda = `ntile(4)` NACIONAL**
+sobre `pib_per_capita` de **base 2021** (≈ 1.118 municípios por quartil). **Por
+UF é inviável** (DF=1, AM=13, RR=14 — sem massa). Municípios **fora do painel**
+não entram (contados no diagnóstico do executor).
+
+**Colunas:**
+
+| Coluna | Tipo | Descrição | Unidade |
+|---|---|---|---|
+| `quartil_pib` | INTEGER | 1 (menor renda) a 4 (maior), `ntile(4)` nacional sobre pib_per_capita 2021 | — |
+| `ano` | INTEGER | 2010 ou 2021 | — |
+| `cobertura_urbana_agua` | DECIMAL | `Σpopulacao_urbana_atendida_agua/nullif(Σpopulacao_urbana,0) × 100` no quartil-ano | % |
+| `municipios_painel` | INTEGER | municípios do painel no quartil | contagem |
+| `variacao_pp` | DECIMAL | (coluna/linha derivada 2021 − 2010 por quartil) | pontos percentuais |
+
+- **Denominador:** cobertura → urbano SNIS; quartil → **PIB per capita
+  (IBGE-PIB × 1000 / IBGE-POP)**, base 2021.
+- **Regra D17:** PIB per capita negativo **cai naturalmente no 1º quartil**
+  (ordenação trata o negativo como menor valor); **sem log**, sem filtro.
+- **Anos:** **2010 e 2021**, painel fixo.
+- **Fontes:** SNIS; **IBGE-PIB**; **IBGE-POP**.
+- **Aceite:** **4 quartis × 2 anos = 8 linhas**. `Σmunicipios_painel` por ano =
+  **4.472** (painel fixo). Cada quartil ≈ 1.118 municípios (**chute a confirmar**
+  a distribuição exata, que depende de empates no `ntile`).
+
+---
+
+## 3. Glossário da gold (definições fechadas)
+
+Uma definição, uma fórmula e uma fonte por termo.
+
+| Termo | Definição | Fórmula / fonte |
+|---|---|---|
+| **Município informante** | município com **numerador e denominador do indicador não nulos** no grão (ano/UF/faixa). | `count(*) FILTER (WHERE num IS NOT NULL AND den IS NOT NULL)`; fonte SNIS/IBGE conforme o mart. |
+| **População de referência** | população **residente total** do município (urbana+rural), ref. 1º/jul (D14). | `populacao_total_ibge` (IBGE-POP). |
+| **População urbana** | subconjunto urbano autodeclarado ao SNIS. | `populacao_urbana` (SNIS). Distinta da de referência. |
+| **Ano de referência** | 2021 nos marts urbanos (D2); não se usa 2022 neles. | D2 / [`decisoes.md`](decisoes.md). |
+| **Painel fixo** (único, D19) | **um** conjunto nomeado: municípios com `populacao_urbana_atendida_agua` e `populacao_urbana` não nulos em **todos os 12 anos de 2010 a 2021** = **4.472 municípios** (Rodada 3.3), as 27 UFs. **Usado nos marts 4 e 10** (não há dois painéis). | silver SNIS; definido uma vez aqui. |
+| **Linha inconsistente (IN049)** | município com `(AG006+AG018−AG024) < AG010`. | excluída com flag (D3), contada por ano. |
+| **Prestador regional sinalizado** | município com investimento per capita > **R$ 1.000/hab** (≈ p99,5). | flag `prestador_regional_provavel` (D4). |
+| **Perda de água** | IN049 = `(AG006+AG018−AG010−AG024)/(AG006+AG018−AG024)×100`. | SNIS (glossário 2022, D3). |
+| **Investimento per capita** | `investimento_total_prestador / populacao_total_ibge`. | SNIS/IBGE-POP; R$ nominal (D4/D14). |
+| **Tarifa média** (D22) | `Σreceita_operacional_direta / (Σ(volume_agua_faturado+volume_esgoto_faturado) × 1000)`, R$/m³ nominal. | SNIS (FN001 ÷ (AG011+ES007)). |
+| **Despesa unitária** (D22) | `Σdespesa_exploracao / (Σ(volume_agua_faturado+volume_esgoto_faturado) × 1000)`, R$/m³ nominal. | SNIS (FN017 ÷ (AG011+ES007)). |
+| **Universo comum** (D22) | município com numerador e denominador não nulos **e denominador > 0**. | regra de `municipios_informantes` da tarifa/despesa unitária. |
+| **PIB per capita** | `pib_municipio × 1000 / populacao_total_ibge` (Mil Reais→reais na gold). | IBGE-PIB/IBGE-POP; nominal (D15). |
+| **Valor nominal** | R$ sem deflação; comparável **só no mesmo ano**. | flag `valor_nominal=true`. |
+
+---
+
+## 4. Executor `pipeline/gold.py`
+
+Mesma arquitetura dos executores existentes
+([`pipeline/transformacao.py`](../pipeline/transformacao.py),
+[`pipeline/transformacao_ibge.py`](../pipeline/transformacao_ibge.py)):
+`conectar()` de [`pipeline/db.py`](../pipeline/db.py), transação única,
+`ROLLBACK` + `sys.exit(1)` em erro, saída no mesmo formato das etapas atuais.
+
+**Comportamento:**
+
+1. **Lê `sql/gold/*.sql` em ordem numérica** (01…10) — ordenação pelo prefixo
+   `NN`, não pela ordem do sistema de arquivos.
+2. Abre **uma transação**; nela: `DROP SCHEMA IF EXISTS gold CASCADE` seguido de
+   `CREATE SCHEMA gold`. Em **qualquer erro**: `ROLLBACK` + `sys.exit(1)` (nenhum
+   schema parcial fica no banco).
+3. **Cada arquivo contém apenas um SELECT (D20).** O executor **compõe** o
+   `CREATE TABLE gold.<nome> AS <select-do-arquivo>`, onde `<nome>` é o nome do
+   mart derivado do nome do arquivo (`NN_nome.sql` → `gold.<nome>`). O arquivo
+   **não** traz `CREATE TABLE`, `DROP`, `BEGIN`/`COMMIT` nem múltiplos statements
+   — isso garante a regra "uma tabela por arquivo" num único ponto (o executor).
+4. **Validação "exatamente uma tabela por arquivo" (D20):** o executor rejeita
+   um arquivo que **não seja um único SELECT** (presença de `;` separando
+   statements, ou de `create`/`drop`/`insert`) antes de compor o `CREATE TABLE`.
+   Depois de criar, confere que a contagem de tabelas em `gold` **incrementou em
+   1** e que a tabela esperada existe. Qualquer desvio → `ROLLBACK` +
+   `sys.exit(1)`.
+5. **Saída** idêntica às etapas atuais: por tabela, uma linha com **nome,
+   nº de linhas, nº de colunas** (ex.:
+   `gold.atendimento_uf_ano · 324 linhas · 9 colunas`). Ao final, um bloco de
+   **diagnóstico** (municípios fora de painel nos marts 4 e 10;
+   `municipios_sinalizados` D4; `linhas_inconsistentes_in049` D3).
+6. Idempotente (schema recriado), sem colunas de auditoria, `data/raw/` nunca
+   tocado, silver nunca alterada (conexão de leitura sobre ela).
+
+**Ordem no [`executar.py`](../executar.py):** SNIS bronze → SNIS silver → IBGE
+bronze → IBGE silver → **cobertura** → **gold**. A gold entra como **6º passo**,
+depois da cobertura (que já roda em
+[`pipeline/cobertura.py`](../pipeline/cobertura.py)); exige as silvers do SNIS e
+do IBGE prontas.
+
+### 4.1 Teste do executor com `sql/gold/00_teste.sql`
+
+- `sql/gold/00_teste.sql` = `SELECT 1 AS x`.
+- **Cinco critérios de aceite do executor:**
+  1. cria `gold.teste` com **1 linha, 1 coluna** (`x = 1`);
+  2. o schema `gold` é **recriado** (DROP+CREATE) a cada execução (idempotência);
+  3. **um erro de SQL** num arquivo dispara `ROLLBACK` + `sys.exit(1)` e **não
+     deixa schema parcial** (nenhuma tabela de `gold` após a falha);
+  4. a validação "uma tabela por arquivo" (D20) **falha** se um arquivo não for
+     um único SELECT (ex.: contém `;` ou `CREATE`/`DROP`), em cópia temporária;
+  5. os arquivos são lidos **em ordem numérica** (um arquivo que dependa da ordem
+     confirma a sequência).
+- **Regra:** **apagar `sql/gold/00_teste.sql`** depois que o executor estiver
+  validado — ele não é mart e não pode ir para a produção da gold.
+
+---
+
+## 5. Testes `tests/test_gold.py`
+
+Estilo dos testes da silver
+([`tests/test_ibge_silver.py`](../tests/test_ibge_silver.py)): **banco
+temporário** via `tmp_path_factory`, **monkeypatch de
+`pipeline.db.CAMINHO_BANCO`**, pipeline completo numa fixture de módulo, e os
+**casos bloqueantes em cópias** do banco (`shutil.copy`). Expectativas numéricas
+**só no teste**.
+
+| Teste | Mart | Liga ao critério de aceite |
+|---|---|---|
+| `test_m1_linhas_e_cobertura` | 1 | 324 linhas (27×12); cobertura ∈ [0,100]; água nacional 2021 ≈ 93,4% |
+| `test_m1_exclusao_a2` | 1 | `linhas_excluidas_a2` > 0 só onde há violação (D5) |
+| `test_m2_28_anos` | 2 | 28 linhas (1995–2022); índices ≥ 0 |
+| `test_m3_in049_nacional` | 3 | índice nacional 2010–2021 ∈ [35,41]% (D3); inconsistentes 0–57/ano |
+| `test_m4_painel_e_rank` | 4 | nº linhas = painel fixo único (4.472) menos A2; `posicao` sem buracos; sem coluna `quintil_variacao` (D21) |
+| `test_m5_total_br_2021` | 5 | `Σinvestimento_total` 27 UFs 2021 = R$ 15.297.535.452,19 |
+| `test_m5_tarifa_despesa_unitaria` | 5 | `tarifa_media` e `despesa_unitaria` presentes, soma sobre soma, ≥ 0 (D18) |
+| `test_m10_mesmo_painel_do_m4` | 10 | painel (4.472) idêntico ao do mart 4 (D19) |
+| `test_m6_faixas_2021` | 6 | 72 linhas (6×12); soma das faixas em 2021 = 5.570 |
+| `test_m7_absolutos` | 7 | 324 linhas; `habitantes_sem_*` ≥ 0 e ≤ pop. total |
+| `test_m8_flag_d4` | 8 | `municipios_sinalizados` nacional ≈ 290; duas colunas diferem em RN |
+| `test_m9_2021_pib` | 9 | 5.302 linhas; PIB per capita negativo preservado, sem log (D17) |
+| `test_m10_painel_quartis` | 10 | 8 linhas (4×2); `Σmunicipios_painel`/ano = 4.472 |
+| `test_executor_uma_tabela_por_arquivo` | — | critério 4 do executor (seção 4.1) |
+| `test_executor_rollback_em_erro` | — | critério 3 do executor (cópia temporária) |
+
+---
+
+## 6. Conferências cruzadas (entre marts e com a silver)
+
+Números que o MCP permitiu confirmar marcados **[confirmado]**; os demais são
+**[a confirmar no SELECT]**.
+
+1. **Investimento Brasil = Σ UFs (2021):** `Σinvestimento_total` do mart 5 nas 27
+   UFs = **R$ 15.297.535.452,19** [confirmado].
+2. **População Brasil IBGE 2021:** `Σpopulacao_total_ibge` 2021 (base dos marts
+   6–8) = **213.317.639** hab em **5.570** municípios [confirmado].
+3. **Painel fixo único (D19) = 4.472** municípios (não nulos nos 12 anos
+   2010–2021), usado nos marts 4 e 10 [confirmado].
+4. **Faixas de porte 2021 (mart 6)** somam **5.570** municípios
+   (1.250/2.520/1.120/354/277/49) [confirmado].
+5. **Exclusões D3 (IN049):** `linhas_inconsistentes_in049` por ano na janela =
+   **0–57** (Verificação D3) [a confirmar no SELECT com a fórmula completa].
+6. **Exclusões D5 (A2):** `linhas_excluidas_a2` por ano 2010–2021 ≤ ~43 em água
+   (Rodada 3.6a) [a confirmar no SELECT].
+7. **`municipios_informantes` coerente com a silver:** a soma por ano do mart 1
+   deve bater com a contagem de informantes urbanos da Rodada 3.2 (ex.: água
+   urbana 2021 ≈ **5.302**) [confirmado parcialmente].
+8. **Sinalizados D4 (mart 8):** `Σmunicipios_sinalizados` 2010–2021 ≈ **290**
+   (Verificação D4) [a confirmar no SELECT].
+
+**A definir na aula 4 (dashboard):**
+
+- **C9** — soma das coberturas ponderadas por região bate com o agregado Brasil
+  (reconciliação região×UF no dashboard).
+- **C10** — série de perdas (mart 3) × série financeira (mart 5) consistentes no
+  mesmo recorte de anos exibido no painel.
+
+---
+
+## 7. Revisão pela IA (MCP somente leitura) — alvo: **mart 4 (ranking)**
+
+O mart 4 é o alvo da revisão de **grão** porque concentra os riscos: painel
+fixo, dois anos, window function e exclusão A2. Roteiro do que perguntar ao MCP
+(somente leitura, sem alterar dado):
+
+1. **Grão:** `SELECT id_municipio, count(*) FROM gold.ranking_atendimento_variacao
+   GROUP BY 1 HAVING count(*) > 1` — deve voltar **vazio** (uma linha por
+   município).
+2. **Painel:** o nº de linhas = municípios com `populacao_urbana_atendida_agua` e
+   `populacao_urbana` não nulos em **2010 e 2021** (≈4.843) **menos** os
+   excluídos por A2. Conferir a diferença.
+3. **Ranking:** `posicao` de 1 a N sem buracos nem empates mal resolvidos;
+   `variacao_pp = cobertura_2021 − cobertura_2010` para uma amostra.
+4. **Sem 2022:** nenhuma linha usa 2022 (D2).
+5. **Fora do painel:** municípios presentes só em um dos anos **não** aparecem.
+
+---
+
+## 8. Suposições, pontos "a confirmar" e decisões que dependem de você
+
+**Suposições da spec (sinalizadas, não resolvidas sozinho):**
+
+- Nomes de coluna dos marts (ex.: `cobertura_urbana_agua`) são **propostos**;
+  seguir o padrão de [`indicadores.md`](indicadores.md) ao implementar.
+- O executor **compõe** o `CREATE TABLE` e o arquivo traz **só o SELECT**
+  (D20, seção 4) — decidido.
+- Marts 4 e 10 usam o **mesmo painel fixo único (4.472)** (D19, glossário) —
+  decidido.
+- **Denominador de `tarifa_media`/`despesa_unitaria`**: **fechado por D22**
+  (verificado nos dados): `volume_agua_faturado + volume_esgoto_faturado`
+  (AG011+ES007), R$/m³ com ÷1.000, valores nominais.
+
+**Itens do dicionário SNIS ainda pendentes (de [`decisoes.md`](decisoes.md) e
+[`indicadores.md`](indicadores.md)):**
+
+- **IN049 / "volume disponibilizado":** a spec usa a fórmula completa confirmada
+  no glossário 2022 (D3). Se algum código (AG006/AG018/AG010/AG024) divergir ao
+  escrever o SQL, **reabrir D3** (não resolver sozinho).
+- **Semântica das colunas de população do SNIS** (`populacao_atendida_agua` é
+  total ou urbano+rural?) — hipótese não confirmada no dicionário; afeta a
+  interpretação dos marts 6 e 7.
+- **Investimento e receita** (prestador vs. município vs. estado; direta vs.
+  indireta) — semântica fina a confirmar para os marts 5 e 8.
+- **Classificação percentual × taxa** dos `indice_*` — quais têm teto 100.
+
+**Decisões que dependem de você:** **nenhuma em aberto** — D18–D22 fecharam
+tarifa/despesa unitária (mart 5, denominador e unidade **verificados nos dados**,
+D22), painel único, forma do arquivo SQL e o mart 4 sem quintil. Restam apenas os
+**itens gerais de dicionário SNIS** acima (semântica de população, investimento/
+receita, percentual×taxa), que não bloqueiam a implementação.
+
+**Conflitos com decisões aprovadas:** **nenhum detectado.** A spec aplica D1–D17
+como estão. Se, ao escrever o SQL, algum código do glossário do IN049 divergir de
+D3, isso é um **conflito a listar** (reabrir D3), não a resolver aqui.
+
+---
+
+## 9. Checklist de entrega da gold (quando for implementar)
+
+- [ ] `sql/gold/01…10_*.sql` — um SELECT por mart, nomes e fórmulas desta spec.
+- [ ] `pipeline/gold.py` — executor (seção 4), constantes nomeadas (limiar D4
+      R$ 1.000/hab, anos de painel, janela 2010–2021).
+- [ ] `tests/test_gold.py` — os testes da seção 5.
+- [ ] `executar.py` — gold como 6º passo (após cobertura).
+- [ ] `sql/gold/00_teste.sql` **apagado** após validar o executor.
+- [ ] comentário D15 (× 1000) nos marts 9 e 10; flag `valor_nominal` nos marts 5
+      e 8; nota de RN no mart 8.
+
+---
+
+## 10. O que foi escrito (resumo)
+
+- **Fundamentos e convenções** (seção 1): schema `gold`, `sql/gold/NN_nome.sql`,
+  10 regras globais, universos de denominador (D14).
+- **10 fichas de mart** (seção 2) com as três perguntas, colunas+tipos+unidades,
+  fórmulas exatas, regras D2/D3/D4/D5/D15/D16/D17 **e D18–D22** e critérios de
+  aceite.
+- **Glossário** (seção 3), **executor + teste** (seção 4), **testes** (seção 5),
+  **6+ conferências cruzadas + 2 para a aula 4** (seção 6), **revisão do mart 4
+  via MCP** (seção 7), **suposições/pendências/decisões** (seção 8).
+
+### Critérios de aceite que ficaram "chute a confirmar"
+
+| Mart | O que falta confirmar no SELECT |
+|---|---|
+| 1 | soma de `municipios_informantes_agua` (≈5.302 em 2021) |
+| 2 | perfil de `municipios_informantes` por ano |
+| 3 | nº de linhas (≤ 756) e inconsistentes por ano (0–57) |
+| 4 | nº de linhas = painel fixo único (4.472) menos A2 |
+| 5 | nº de linhas (≤ 756) nos anos iniciais |
+| 6 | perfil de cobertura por faixa |
+| 7 | `habitantes_sem_*` por UF |
+| 8 | per capita por UF; `municipios_sinalizados` (≈290) |
+| 9 | reavaliar PIB per capita negativo em 2021 (Guamaré/RN) |
+| 10 | distribuição exata dos quartis (empates no `ntile`) |
+
+### Decisões que dependem de você
+
+**Nenhuma decisão em aberto.** D18–D22 fecharam os pontos antes pendentes
+(tarifa/despesa unitária no mart 5 — denominador e unidade **verificados nos
+dados**, D22; painel fixo único; arquivo SQL só com SELECT; mart 4 sem quintil).
+Restam apenas itens gerais de dicionário SNIS, que não bloqueiam a implementação.
+
+---
+
+## 11. Fatos confirmados no MCP (somente leitura, 2026-11-08)
+
+| Fato | Valor |
+|---|---|
+| UFs distintas (silver SNIS) | 27 |
+| Anos (silver SNIS) | 28 (1995–2022) |
+| Mart 1/3/5/7/8 — pares UF×ano com dado urbano 2010–2021 | 324 (27×12) |
+| População total IBGE 2021 (Brasil) | 213.317.639 hab, 5.570 municípios |
+| Faixas de porte 2021 (mart 6) | 1.250/2.520/1.120/354/277/49 = 5.570 |
+| Painel fixo único (12 anos, não nulos; marts 4 e 10) | 4.472 |
+| Mart 9 (2021, SNIS urbano + PIB + pop casados) | 5.302 |
+| Mart 2 — anos com volumes | 28 (1995–2022) |
+| Investimento total Brasil 2021 (mart 5) | R$ 15.297.535.452,19 |
+
+## 12. Consultas MCP usadas (referência)
+
+```sql
+-- UFs/anos
+SELECT count(DISTINCT sigla_uf), count(DISTINCT ano), min(ano), max(ano)
+FROM silver.municipio_agua_esgoto;
+
+-- pares UF×ano com urbano (2010–2021)
+SELECT count(*) FROM (SELECT ano, sigla_uf FROM silver.municipio_agua_esgoto
+  WHERE ano BETWEEN 2010 AND 2021 AND populacao_urbana IS NOT NULL
+    AND populacao_urbana_atendida_agua IS NOT NULL GROUP BY ano, sigla_uf);
+
+-- população e municípios IBGE 2021
+SELECT sum(populacao_total_ibge), count(*) FROM silver.ibge_populacao_municipio
+WHERE ano = 2021;
+
+-- faixas de porte 2021 (D16)
+SELECT CASE WHEN populacao_total_ibge<5000 THEN '1' WHEN populacao_total_ibge<20000 THEN '2'
+  WHEN populacao_total_ibge<50000 THEN '3' WHEN populacao_total_ibge<100000 THEN '4'
+  WHEN populacao_total_ibge<500000 THEN '5' ELSE '6' END, count(*)
+FROM silver.ibge_populacao_municipio WHERE ano=2021 AND populacao_total_ibge IS NOT NULL
+GROUP BY 1 ORDER BY 1;
+
+-- painel 12 anos (mart 10)
+SELECT count(*) FROM (SELECT id_municipio FROM silver.municipio_agua_esgoto
+  WHERE ano BETWEEN 2010 AND 2021 AND populacao_urbana_atendida_agua IS NOT NULL
+    AND populacao_urbana IS NOT NULL GROUP BY id_municipio HAVING count(DISTINCT ano)=12);
+
+-- mart 9 (2021, três fontes casadas)
+SELECT count(*) FROM silver.municipio_agua_esgoto s
+  JOIN silver.ibge_populacao_municipio p ON p.id_municipio=s.id_municipio AND p.ano=s.ano
+  JOIN silver.ibge_pib_municipio b ON b.id_municipio=s.id_municipio AND b.ano=s.ano
+  WHERE s.ano=2021 AND s.populacao_urbana IS NOT NULL
+    AND s.populacao_urbana_atendida_agua IS NOT NULL
+    AND p.populacao_total_ibge IS NOT NULL AND b.pib_municipio IS NOT NULL;
+
+-- investimento total Brasil 2021 (mart 5)
+SELECT sum(investimento_total_prestador) FROM silver.municipio_agua_esgoto WHERE ano=2021;
+```

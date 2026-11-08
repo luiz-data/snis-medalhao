@@ -205,7 +205,11 @@ IBGE abaixo usa um ID daquele catálogo**.
 - **`municipios_informantes`:** municípios com SNIS, PIB e população não nulos
   em 2021 e casados nas três fontes.
 - **Ressalvas:** PIB **nominal** (um único ano, comparação válida); correlação ≠
-  causalidade; teste de cobertura de junção nas três fontes.
+  causalidade; teste de cobertura de junção nas três fontes. **PIB per capita
+  negativo (D17):** há município com PIB negativo real do SIDRA (Guamaré/RN, 2012;
+  em 2021 reavaliar na carga). Se o PIB per capita de 2021 for negativo, ele
+  **permanece no dado**, **cai no menor quartil** e **não recebe transformação
+  logarítmica** (log de valor ≤ 0 é indefinido) — nenhum filtro ou clamp.
 
 ### Mart 10 — `avanco_por_renda_painel`
 
@@ -224,7 +228,10 @@ IBGE abaixo usa um ID daquele catálogo**.
 - **`municipios_informantes`:** apenas municípios do **painel fixo** presentes
   em 2010 e 2021 nas três fontes.
 - **Ressalvas:** **painel fixo obrigatório**; declarar a mudança de cobertura;
-  `ntile` sobre renda; nunca `avg(indice_*)`.
+  `ntile` sobre renda; nunca `avg(indice_*)`. **PIB per capita negativo (D17):**
+  permanece no dado e **cai no menor quartil** do `ntile(4)` (a ordenação trata o
+  negativo como o menor valor, naturalmente no 1º quartil); **não aplicar
+  transformação logarítmica** ao PIB per capita (log indefinido para ≤ 0).
 
 ---
 

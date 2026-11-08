@@ -1433,3 +1433,135 @@ SELECT ano, count(*), string_agg(id_municipio||'('||uf||')', ', ') FROM u GROUP 
   linhas por UF; não recalculei cada índice de UF individualmente.
 - **D6:** classificação emancipação/fusão é **inferência** pelo ano de aparição;
   nome e vigência de cada código **a confirmar na ingestão da DTB** (sem internet).
+
+---
+---
+
+# Verificação de despesa unitária e tarifa média (mart 5)
+
+Teste, com MCP somente leitura, das definições de `despesa_unitaria` (IN003) e
+`tarifa_media` (IN004) do mart 5. Glossário SNIS 2022: IN003 lista AG011, ES007,
+FN017; IN004 lista AG011, ES007, FN002, FN003, FN007, FN038 (FN001 = FN002 +
+FN003 + FN007 + FN038). O glossário **não** traz a fórmula em texto. Hipóteses:
+**IN003 = FN017 / (AG011 + ES007)** e **IN004 = FN001 / (AG011 + ES007)**, em
+**R$/m³**.
+
+## V1 — Mapeamento código SNIS → coluna da silver
+
+Via `duckdb_columns()` (schema `silver`, tabela `municipio_agua_esgoto`):
+
+| Código SNIS | Grandeza | Coluna na silver | Existe? |
+|---|---|---|---|
+| AG011 | volume de água **faturado** | `volume_agua_faturado` | ✅ |
+| ES007 | volume de esgoto **faturado** | `volume_esgoto_faturado` | ✅ |
+| FN002 | receita operacional direta de água | `receita_operacional_direta_agua` | ✅ |
+| FN003 | receita operacional direta de esgoto | `receita_operacional_direta_esgoto` | ✅ |
+| FN007 | receita op. direta de água exportada | `receita_operacional_direta_agua_exportada` | ✅ |
+| FN038 | receita op. direta de esgoto importado | `receita_operacional_direta_esgoto_importado` | ✅ |
+| FN001 | receita operacional direta (total) | `receita_operacional_direta` | ✅ |
+| FN017 | despesas de exploração (DEX) | `despesa_exploracao` | ✅ |
+
+- **Todas as 8 informações existem** como coluna. **FN001 não precisa ser
+  composto** — já existe como `receita_operacional_direta`; mesmo assim a
+  identidade `FN001 = FN002+FN003+FN007+FN038` foi testada (V2a).
+- **Indicadores publicados IN003 e IN004 NÃO existem como coluna** na silver: a
+  busca por `indice_*` retorna 30 colunas, **nenhuma** de tarifa ou de despesa
+  por m³ (as mais próximas — `indice_faturamento_agua`,
+  `indice_consumo_agua_faturado`, `indice_perda_faturamento` — são outros
+  indicadores). **Logo não há coluna publicada para comparação linha a linha**;
+  a confirmação se apoia na **identidade de FN001** e na **sanidade da série
+  nacional** (V2b/V3) contra os valores conhecidos do SNIS.
+
+## V2a — Identidade FN001 = FN002 + FN003 + FN007 + FN038 (2010–2021)
+
+```sql
+SELECT ano,
+  count(*) FILTER (WHERE <5 componentes não nulos>) AS linhas_completas,
+  count(*) FILTER (WHERE <completas> AND
+    abs(receita_operacional_direta
+      - (receita_operacional_direta_agua+receita_operacional_direta_esgoto
+         +receita_operacional_direta_agua_exportada
+         +receita_operacional_direta_esgoto_importado)) <= 0.01) AS batem
+FROM silver.municipio_agua_esgoto WHERE ano BETWEEN 2010 AND 2021 GROUP BY ano;
+```
+
+**Resultado: `batem = linhas_completas` em todos os 12 anos** (2010: 1.930/1.930;
+2012: 2.219/2.219; 2021: 2.787/2.787; etc.). A coluna `receita_operacional_direta`
+**é** FN001 (identidade exata, 0 divergências). Confirma o numerador da tarifa.
+
+## V2b/V3 — Conversão de unidade e sanidade da série nacional
+
+**Correção de unidade importante:** o volume faturado está em **1.000 m³/ano**
+(confirmado na Rodada 3.6c: SP `volume_agua_consumido` = 729.299,66 ×1.000 m³ ≈
+163 L/hab·dia). Logo, para obter **R$/m³**:
+
+> **R$/m³ = Σreceita (R$) / ( Σvolume (1.000 m³) × 1.000 )**
+
+(ou seja, **dividir** por 1.000 o quociente receita/volume — **não multiplicar**,
+como sugeria a redação da hipótese; multiplicar daria mediana ≈ R$ 4,6 **milhões**
+/m³, absurda). Série nacional ponderada (soma/soma, com `vol>0`):
+
+| Ano | nº informantes | `tarifa_media_br` (R$/m³) | `despesa_unitaria_br` (R$/m³) |
+|---|---|---|---|
+| 2010 | 4.824 | 2,18 | 1,51 |
+| 2013 | 4.894 | 2,64 | 1,82 |
+| 2016 | 4.938 | 3,38 | 2,36 |
+| 2019 | 5.033 | 3,87 | 2,60 |
+| **2021** | **5.129** | **4,12** | **2,83** |
+
+```sql
+SELECT ano,
+  sum(receita_operacional_direta) FILTER (WHERE vol_fat>0)
+    / (sum(vol_fat) FILTER (WHERE receita_operacional_direta IS NOT NULL) * 1000.0) AS tarifa_media_br,
+  sum(despesa_exploracao) FILTER (WHERE vol_fat>0)
+    / (sum(vol_fat) FILTER (WHERE despesa_exploracao IS NOT NULL) * 1000.0) AS despesa_unitaria_br
+FROM (SELECT *, coalesce(volume_agua_faturado,0)+coalesce(volume_esgoto_faturado,0) AS vol_fat
+      FROM silver.municipio_agua_esgoto WHERE ano BETWEEN 2010 AND 2021)
+GROUP BY ano ORDER BY ano;
+```
+
+A série é **monotônica, crescente e na faixa conhecida do SNIS** (tarifa média
+nacional ~R$ 2–4/m³ na década; DEX unitária menor que a tarifa em todos os anos).
+Distribuição municipal 2021 (R$/m³): tarifa mediana **4,64**, p95 **9,73**;
+despesa mediana **3,87**, p95 **10,03** (5.129 municípios com `vol>0`). **Sanidade
+confirmada** — nenhuma variação (ex.: retirar exportação do denominador, ou usar
+FN002+FN003 no numerador) foi necessária, pois as hipóteses já produzem valores
+corretos e a identidade FN001 fecha.
+
+## V4 — Universo comum por UF (2021)
+
+Municípios com numerador **e** denominador não nulos e **denominador > 0** (mesmo
+denominador `AG011+ES007` para as duas colunas → `n_tarifa = n_despesa`):
+
+| UF | n | UF | n | UF | n |
+|---|---|---|---|---|---|
+| MG | 793 | PB | 186 | ES | 78 |
+| SP | 633 | CE | 181 | SE | 75 |
+| RS | 470 | PE | 178 | RO | 47 |
+| BA | 402 | PI | 172 | AM | 40 |
+| PR | 398 | RN | 159 | AC | 22 |
+| SC | 289 | MA | 144 | AP | 16 |
+| GO | 238 | TO | 135 | RR | 14 |
+| | | MT | 111 | DF | 1 |
+| | | AL | 93 | | |
+| | | PA | 88 | | |
+| | | RJ | 88 | | |
+| | | MS | 78 | | |
+
+**27 UFs presentes** (DF com 1 município — prestador único). Total ≈ 5.129
+municípios. O **universo comum** (num. e den. não nulos, den. > 0) é a regra de
+`municipios_informantes` do mart 5 para essas colunas.
+
+## V5 — Conclusão
+
+- **Numeradores:** `tarifa_media` ← `receita_operacional_direta` (FN001);
+  `despesa_unitaria` ← `despesa_exploracao` (FN017).
+- **Denominador comum:** `volume_agua_faturado + volume_esgoto_faturado`
+  (AG011 + ES007), com `nullif(…, 0)` e exigindo den. > 0.
+- **Unidade:** **R$/m³ = Σnum / (Σ(vol_fat) × 1.000)** — valores **nominais**
+  (comparar só no mesmo ano; deflacionar está fora do escopo).
+- **Agregação:** soma sobre soma (nunca `avg` de razão), herdada da regra global.
+- **Ressalva:** os indicadores publicados IN003/IN004 **não** estão materializados
+  como coluna; a confirmação vem da **identidade FN001 (100%)** e da **sanidade da
+  série nacional** (faixa conhecida do SNIS), não de um match linha a linha com
+  coluna publicada. → **Base para a D22.**

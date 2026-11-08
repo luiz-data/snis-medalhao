@@ -2,8 +2,8 @@
 
 | | |
 |---|---|
-| **Status** | aprovada (D7–D10 em 2026-11-08); D7 provisória, revisar após 1ª medição |
-| **Versão** | 1 |
+| **Status** | aprovada (D7–D17 em 2026-11-08); D7 provisória, revisar após 1ª medição |
+| **Versão** | 2 (ajustada aos arquivos reais baixados em 2026-11-08) |
 | **Data** | 2026-11-08 |
 | **Responsável** | Luiz |
 | **Banco** | `snis.duckdb` (o mesmo do SNIS) · schemas `bronze` e `silver` |
@@ -11,7 +11,7 @@
 
 > **Referências de leitura obrigatória:** catálogo [`fontes-ibge.md`](fontes-ibge.md);
 > fórmulas e uso nos marts [`indicadores.md`](indicadores.md); decisões
-> **D1–D6 APROVADAS em 2026-11-08** [`decisoes.md`](decisoes.md); specs-modelo
+> **D1–D17 APROVADAS em 2026-11-08** [`decisoes.md`](decisoes.md); specs-modelo
 > [`spec-ingestao.md`](spec-ingestao.md) (bronze SNIS) e
 > [`spec-transformacao.md`](spec-transformacao.md) (silver SNIS, alertas A1–A4).
 
@@ -31,7 +31,7 @@ nem PIB, nem UF/região. Sem elas, 9 dos 10 marts não fecham.
 
 | Fonte | Tabela silver | Dá ao projeto | Marts que dependem (D1) |
 |---|---|---|---|
-| IBGE-POP | `silver.ibge_populacao_municipio` | população residente total do município por ano | **6, 7, 8, 9, 10** |
+| IBGE-POP | `silver.ibge_populacao_municipio` | população residente total (urbana + rural, ref. 1º/jul; D14) do município por ano | **6, 7, 8, 9, 10** |
 | IBGE-PIB | `silver.ibge_pib_municipio` | PIB municipal nominal por ano | **9, 10** |
 | IBGE-DTB | `silver.ibge_dtb_municipio` | UF e região por município (substitui a seed de UF) | **1, 3, 4, 5, 7, 8** |
 
@@ -68,83 +68,149 @@ fonte IBGE.
 
 | Fonte | Grão | Chave | Unicidade esperada |
 |---|---|---|---|
-| IBGE-POP | município × ano | `(ano, id_municipio)` | 0 duplicatas, 0 nulos |
-| IBGE-PIB | município × ano | `(ano, id_municipio)` | 0 duplicatas, 0 nulos |
-| IBGE-DTB | município (fotografia de **2025**, D6) | `id_municipio` | 0 duplicatas, 0 nulos |
+| IBGE-POP | município × ano | `(ano, id_municipio)` | 0 duplicatas na chave; **`populacao` nula é permitida** (fatos conhecidos, D13); **1 linha sem `id_municipio`** (ano 2025) é excluída da silver (D13) |
+| IBGE-PIB | município × ano | `(ano, id_municipio)` | 0 duplicatas, 0 nulos na chave; **`valor` pode ser símbolo de ausência** do SIDRA (vira NULL, D11) |
+| IBGE-DTB | município (fotografia de **2025**, D6) | `id_municipio` | 0 duplicatas, 0 nulos; **5.571 linhas** (5.570 instalados + 1 criado e ainda sem população, D12) |
 
 `id_municipio` sempre com **7 dígitos, como texto**, preservando zeros à esquerda
-(os 2 primeiros dígitos são o código da UF).
+(os 2 primeiros dígitos são o código da UF). Medido na extração de 2026-11-08: na
+população, **todos** os `id_municipio` não vazios têm 7 dígitos; há **1** registro
+de `id_municipio` vazio (ano 2025, população 5.877).
 
 ---
 
 ## 3. Origem dos arquivos e como obtê-los
 
 **Convenção de pasta** (do catálogo): cada extração vai para
-`data/raw/ibge/<fonte>/<data_extracao>/`, com um `MANIFEST.md` contendo
+`data/raw/ibge/<fonte>/AAAA-MM-DD/`, com um `MANIFEST.md` contendo
 **origem, data de extração, nº de linhas e checksum** (ex.: `sha256`) de cada
-arquivo. `<fonte>` ∈ `{populacao, pib, dtb}`; `<data_extracao>` no formato
-`AAAA-MM-DD`. Nada em `data/raw/` é editado depois de gravado.
+arquivo. `<fonte>` ∈ `{populacao, pib, dtb}`. **A extração atual é a de
+`2026-11-08`** — todas as três fontes estão em
+`data/raw/ibge/<fonte>/2026-11-08/`. Nada em `data/raw/` é editado depois de
+gravado.
 
 > O MANIFEST é a âncora dos critérios de aceite: a bronze valida linhas e
 > colunas **contra os números do MANIFEST** da extração usada (seção 4).
 
-### 3.1 IBGE-POP — via Base dos Dados (BigQuery)
+### 3.1 IBGE-POP — via Base dos Dados (BigQuery) — **baixado em 2026-11-08**
 
-Exportar a tabela `br_ibge_populacao.municipio` (ver [`fontes-ibge.md`](fontes-ibge.md))
-salvando como CSV em `data/raw/ibge/populacao/<data_extracao>/`.
+Exportado pelo **console do BigQuery** (tabela `br_ibge_populacao.municipio`) e
+salvo como CSV em `data/raw/ibge/populacao/2026-11-08/populacao_municipio.csv`.
+Ver [`fontes-ibge.md`](fontes-ibge.md) e o
+[`MANIFEST.md`](../data/raw/ibge/populacao/2026-11-08/MANIFEST.md) da pasta.
 
-Consulta sugerida (**nomes de coluna a confirmar no BigQuery**):
+Consulta usada (nomes de coluna **confirmados** na extração):
 
 ```sql
--- a confirmar no BigQuery: nomes exatos de ano/id_municipio/populacao
-SELECT
-  ano,
-  id_municipio,
-  populacao
+SELECT ano, id_municipio, populacao
 FROM `basedosdados.br_ibge_populacao.municipio`
 ORDER BY ano, id_municipio;
 ```
 
-Carregar a **série completa** disponível (1991–2025 segundo o catálogo).
+**Layout real do CSV** (3 colunas, UTF-8, vírgula, com cabeçalho):
+`ano`, `id_municipio`, `populacao`.
 
-### 3.2 IBGE-PIB — via Base dos Dados (BigQuery)
+**Medições da extração (confirmadas em 2026-11-08):** 191.099 linhas de dados;
+anos **1991–2025**; **5.570** municípios/ano em 2012–2025 e **5.565** em 2010–2011;
+**0** duplicatas na chave `(ano, id_municipio)`; **534** populações nulas (**533**
+em 1996, **1** em 2009, **nenhuma** em 2010–2021); **1** linha sem `id_municipio`
+(ano 2025, população 5.877). `sha256` e detalhe no MANIFEST.
 
-Exportar a tabela de PIB municipal (origem IBGE / SIDRA 5938) para
-`data/raw/ibge/pib/<data_extracao>/`.
+Carregar a **série completa** (1991–2025). As peculiaridades acima (nulos e linha
+sem id) são **fatos conhecidos** tratados na silver por D13 (seção 5.1), não
+erros de extração.
 
-Consulta sugerida (**nome de tabela e de coluna de PIB a confirmar no BigQuery**;
-o dataset de PIB municipal na Base dos Dados costuma ser `br_ibge_pib.municipio`):
+### 3.2 IBGE-PIB — via API do SIDRA, tabela 5938 (D11) — **baixado em 2026-11-08**
 
-```sql
--- a confirmar no BigQuery: dataset/tabela (br_ibge_pib.municipio?) e
--- nome da coluna de PIB nominal (pib? valor?)
-SELECT
-  ano,
-  id_municipio,
-  pib
-FROM `basedosdados.br_ibge_pib.municipio`
-ORDER BY ano, id_municipio;
+**Fonte real: API pública do SIDRA (`apisidra`), tabela 5938** ("Produto interno
+bruto a preços correntes — Referência 2010"). **A Base dos Dados não foi usada**
+(D11; motivo: a tabela da Base dos Dados não foi confirmada). Salvo em
+`data/raw/ibge/pib/2026-11-08/`; ver o
+[`MANIFEST.md`](../data/raw/ibge/pib/2026-11-08/MANIFEST.md).
+
+- **Variável `37`** — "Produto Interno Bruto a preços correntes" (código
+  confirmado na API de metadados, não de memória).
+- **Unidade: Mil Reais** (código de unidade `40`).
+- **Nível territorial:** município (`n6`), todos (`all`).
+- **Anos baixados: 2010–2021** (12 anos) — cobre exatamente a janela do projeto.
+
+URLs usadas (baixado **ano a ano** para evitar recusa por excesso de células):
+
+```
+Metadados: https://servicodados.ibge.gov.br/api/v3/agregados/5938/metadados
+Valores:   https://apisidra.ibge.gov.br/values/t/5938/n6/all/v/37/p/<ANO>
 ```
 
-Carregar a série completa (2002–2021; **2002–2009 retropolada**, seção 7).
+**Arquivos na pasta (2026-11-08):**
+
+- `pib_5938_<ANO>.json` — **12 parciais** (2010…2021), resposta bruta do SIDRA,
+  preservados.
+- `pib_municipio.csv` — CSV montado a partir dos 12 JSON (passo documentado no
+  MANIFEST), **66.840 linhas** (5.570 municípios × 12 anos).
+
+**Layout do JSON bruto do SIDRA** (lista de objetos; o **1º objeto é o
+dicionário de rótulos** e é descartado na montagem): campos
+`NC`, `NN`, `MC`, `MN` (= "Mil Reais"), `V` (valor), `D1C` (município, 7 díg.),
+`D1N` (nome), `D2C` (= "37"), `D2N` (variável), `D3C`/`D3N` (ano). A montagem
+mapeia `D1C→id_municipio`, `D1N→nome_municipio`, `D3C→ano`, `D2N→variavel`,
+`MN→unidade`, `V→valor`.
+
+**Layout do CSV montado `pib_municipio.csv`** (6 colunas, UTF-8, vírgula, com
+cabeçalho):
+`id_municipio`, `nome_municipio`, `ano`, `variavel`, `unidade`, `valor`.
+`valor` é **inteiro em Mil Reais** (valor nominal, comparar só no mesmo ano);
+`nome_municipio` vem no formato `"Nome - UF"` (ex.: `São Paulo - SP`).
+
+**Símbolos de ausência do SIDRA:** o valor `V` pode trazer símbolos em vez de
+número. Os símbolos do padrão SIDRA são **`-`** (zero absoluto), **`..`** (não
+se aplica), **`...`** (dado não disponível) e **`X`** (omitido para não
+identificar o informante). **Medido nesta extração:** o **único** símbolo que
+aparece é **`...`**, em **15** células (5 municípios × 3 anos: 2010, 2011 e
+2012 — Mojuí dos Campos/PA, Pescaria Brava/SC, Balneário Rincão/SC, Pinto
+Bandeira/RS e Paraíso das Águas/MS, municípios instalados depois de 2012). O CSV
+montado preserva o símbolo `...` literal nessas linhas; o tratamento é na silver
+(seção 5.2, D11).
 
 ### 3.3 IBGE-DTB 2025 (D6, D8)
 
-**Fonte principal (D8) — arquivo oficial do IBGE:** o **relatório de municípios
-da DTB 2025** (Divisão Territorial Brasileira), publicado em
-`https://www.ibge.gov.br/.../divisao-territorial-brasileira.html` (arquivo
-`.xls`/`.ods`/`.zip`). Procedimento:
+**Fonte principal (D8) — arquivo oficial do IBGE — baixado em 2026-11-08:** o
+**relatório de municípios da DTB 2025**, baixado como `DTB_2025.zip` do servidor
+`geoftp.ibge.gov.br` (a página oficial retornou HTTP 403 na coleta automatizada).
+Procedimento realizado:
 
-1. **Preservar o original** exatamente como baixado em
-   `data/raw/ibge/dtb/<data_extracao>/` (planilha/zip íntegro, somente leitura).
-2. **Converter para CSV como passo separado e documentado** (no MANIFEST:
-   ferramenta usada, aba de origem, encoding, colunas selecionadas), salvando o
-   CSV ao lado do original na mesma pasta.
-3. Da planilha, extrair **código do município (7 dígitos), UF e macrorregião**
-   (e o nome do município como rótulo). Os **nomes exatos de coluna da DTB** vão
-   para a seção 10 (*a confirmar na extração*).
+1. **Original preservado** em `data/raw/ibge/dtb/2026-11-08/DTB_2025.zip` (zip
+   íntegro com 8 planilhas, somente leitura).
+2. **Convertido para CSV** como passo separado e documentado (pandas + engine
+   `xlrd`, aba única `DTB_Municípios`, cabeçalho na 7ª linha, encoding UTF-8),
+   salvo ao lado como `dtb_municipio.csv`. Detalhe no
+   [`MANIFEST.md`](../data/raw/ibge/dtb/2026-11-08/MANIFEST.md).
 
-A **versão é 2025** (D6) e deve constar no MANIFEST.
+**Layout real do `dtb_municipio.csv`** (9 colunas, UTF-8, vírgula, com
+cabeçalho; **5.571 linhas** de dados):
+`UF`, `Nome_UF`, `Região Geográfica Intermediária`,
+`Nome Região Geográfica Intermediária`, `Região Geográfica Imediata`,
+`Nome Região Geográfica Imediata`, `Município`, `Código Município Completo`,
+`Nome_Município`.
+
+- `UF` é o **código numérico** de 2 dígitos (ex.: `35` = São Paulo); **não há
+  coluna de sigla da UF** (ver seção 5.3 para como obtê-la).
+- `Código Município Completo` é o `id_municipio` de **7 dígitos** (texto, com
+  zeros à esquerda).
+- A DTB traz **região intermediária** e **região imediata** (divisão regional de
+  2017), **não** a macrorregião (Norte/Nordeste/…). A macrorregião é derivada do
+  código da UF na silver (seção 5.3).
+
+**Linha extra — 5.571 vs. 5.570 municípios (D12):** o esperado são 5.570
+municípios instalados, mas o relatório traz 5.571 linhas. A linha extra foi
+identificada consultando o CSV: é **`5101837` — Boa Esperança do Norte (MT)**,
+único `id_municipio` da DTB que **não** aparece na estimativa de população de
+2025 (que tem 5.570 municípios). **Não** é duplicata (0 códigos repetidos),
+cabeçalho nem código especial: é um **município novo**, criado por lei estadual
+de MT e **presente na base territorial 2025, mas ainda sem população estimada**
+pelo IBGE. Portanto o critério de aceite correto da DTB é **5.571 linhas**
+(seção 9.3, D12), não 5.570.
+
+A **versão é 2025** (D6, DATA BASE 31/12/2025) e consta no MANIFEST.
 
 **Alternativa — Base dos Dados (só com a versão documentada):** diretório de
 municípios (`br_bd_diretorios_brasil.municipio` — *a confirmar no BigQuery*), que
@@ -217,61 +283,118 @@ transação única com `ROLLBACK`, alertas no modelo A1–A4. `id_municipio` sem
 |---|---|---|---|
 | `ano` | `ano` | `INTEGER` | 4 dígitos |
 | `id_municipio` | `id_municipio` | `VARCHAR` | 7 dígitos, zeros à esquerda |
-| `populacao_total_ibge` | `populacao` | `INTEGER` | nome usado nas fórmulas dos marts (D10); inteiro, máx. ~12,4 mi cabe em `INTEGER` |
+| `populacao_total_ibge` | `populacao` | `INTEGER` | nome usado nas fórmulas dos marts (D10); **população residente total (urbana + rural), referência 1º de julho (D14)** — **não** é a `populacao_urbana` do SNIS; inteiro, máx. ~12,4 mi cabe em `INTEGER`; **pode ser NULL** (fatos conhecidos, D13) |
 
-- **Pré-validação (regex, antes do CAST):** `ano` casa `^[0-9]{4}$`;
-  `id_municipio` casa `^[0-9]{7}$`; `populacao` casa `^[0-9]+$` (inteiro não
-  negativo, sem decimais).
-- **Faixas válidas:** `ano` em 1991–2025; `populacao_total_ibge` ≥ 0 e abaixo do
-  teto de `INTEGER` (maior município < 2,1 bi, folga ampla).
+- **Exclusão da linha sem `id_municipio` (D13):** a linha com `id_municipio`
+  vazio (medida: 1 linha, ano 2025, população 5.877) é **excluída** da silver,
+  com **alerta não bloqueante** que a **lista** (IA6). A exclusão só é permitida
+  se o `ano` dessa linha estiver **fora de 2010–2021**; uma linha sem
+  `id_municipio` **dentro** da janela é **bloqueante** (IB9). A bronze mantém a
+  linha (espelho fiel).
+- **Pré-validação (regex, antes do CAST), já sem a linha excluída:** `ano` casa
+  `^[0-9]{4}$`; `id_municipio` casa `^[0-9]{7}$`; `populacao` casa `^[0-9]+$`
+  (inteiro não negativo, sem decimais) **ou é vazio/NULL** — população nula é
+  **permitida** (ver abaixo), não reprova a regex.
+- **População nula (D13, alerta não bloqueante IA7):** `populacao` nula é
+  aceita; conta-se por ano. O esperado é **533 em 1996 e 1 em 2009** (nenhuma em
+  2010–2021). **Qualquer** população nula em **2010–2021** é **bloqueante**
+  (IB10), porque a janela analítica não admite buraco.
+- **Faixas válidas:** `ano` em 1991–2025; `populacao_total_ibge` ≥ 0 (quando não
+  nula) e abaixo do teto de `INTEGER` (maior município < 2,1 bi, folga ampla).
 - **Checagem de revisão de série (não bloqueante, IA5):** comparar o valor
   ingerido de **São Paulo (`id_municipio = 3550308`) em 2021** com a referência
   IBGE de **12.396.372 habitantes**. A diferença (absoluta e %) é **registrada no
   relatório da execução**; não bloqueia (a série pode ser revisada entre
   publicações), mas um desvio grande sinaliza fonte ou ano trocados.
+  **Medido em 2026-11-08:** SP 2021 = **12.396.372** (diferença **0**); SP 2010 =
+  **11.253.503** e SP 2022 = **11.451.999** (Censo 2022, repetido em 2023) — batem.
+- **Quebra de série 2021 → 2022 (ressalva, não bloqueante):** a população de SP
+  cai de 12.396.372 (estimativa 2021) para 11.451.999 (Censo 2022). É mudança de
+  método (estimativa → Censo), registrada como **ressalva no catálogo**
+  [`fontes-ibge.md`](fontes-ibge.md) e em **D13**. **A janela 2010–2021 não é
+  afetada** (usa só valores pré-Censo 2022).
 
 ### 5.2 `silver.ibge_pib_municipio`
+
+A bronze reflete o **CSV montado `pib_municipio.csv`** (seção 3.2): 6 colunas,
+`valor` em **Mil Reais** e com o símbolo `...` preservado nas 15 linhas de
+ausência. A silver tipa e trata os símbolos:
 
 | Coluna silver | Origem (bronze) | Tipo | Observação |
 |---|---|---|---|
 | `ano` | `ano` | `INTEGER` | 4 dígitos |
-| `id_municipio` | `id_municipio` | `VARCHAR` | 7 dígitos |
-| `pib_municipio` | `pib` | `DECIMAL(18,2)` | **valor nominal** (seção 7); mesma escolha do SNIS para dinheiro |
+| `id_municipio` | `id_municipio` | `VARCHAR` | 7 dígitos (campo `D1C` do SIDRA) |
+| `pib_municipio` | `valor` | `BIGINT` | **inteiro em Mil Reais** (variável 37, unidade 40); valor nominal; **pode ser NULL** quando a fonte traz símbolo de ausência (D11). **`BIGINT`, nunca `DECIMAL` (D15):** o SIDRA entrega inteiro em Mil Reais; a conversão para reais é só na gold |
 
-- **Pré-validação (regex):** `ano` `^[0-9]{4}$`; `id_municipio` `^[0-9]{7}$`;
-  `pib` casa `^[0-9]+(\.[0-9]{1,2})?$` (não negativo, **no máximo 2 casas
-  decimais** — mesma regra B4 do SNIS: checar casas **no texto** antes do
-  `CAST`, porque `CAST(... AS DECIMAL(_,2))` arredonda em silêncio).
-- **Faixas válidas:** `ano` em 2002–2021; `pib_municipio` ≥ 0.
-- **Unidade mantida como na fonte (D9):** bronze e silver **preservam o valor
-  como veio** (a Base dos Dados costuma publicar em **R$ 1.000**/milhares); a
-  **unidade é registrada em [`fontes-ibge.md`](fontes-ibge.md)** na 1ª extração.
-  A **conversão/per capita é só na gold**, com comentário explícito. A silver
-  **não converte**.
-- **Critério de aceite de sanidade (D9):** o PIB de **São Paulo
-  (`id_municipio = 3550308`) em 2021** deve ser compatível com **≈ R$ 828,98
-  bilhões** — `≈ 828.980.000.000` se a unidade for **reais**, ou `≈ 828.980.000`
-  se for **milhares de reais**. O valor ingerido deve bater com uma das duas
-  leituras; a leitura correta fixa a unidade registrada em `fontes-ibge.md`.
+- **Pré-validação (regex, antes do CAST):** `ano` `^[0-9]{4}$`;
+  `id_municipio` `^[0-9]{7}$`; `valor` casa **`^-?[0-9]+$`** (inteiro em Mil
+  Reais **com sinal** — o SIDRA entrega o PIB em Mil Reais como inteiro, que
+  **pode ser negativo**, D17) **ou** é um **símbolo de ausência** do SIDRA ∈
+  **{`-`, `..`, `...`, `X`}**.
+- **PIB negativo (D17, alerta IA9):** o PIB municipal **pode ser negativo**
+  (impostos sobre produtos líquidos de subsídios negativos). O valor é
+  **preservado** (`BIGINT` aceita sinal); **IA9** lista cada negativo
+  `(id_municipio, ano, valor)`. **Constante nomeada `PIB_NEGATIVOS_MAX = 5`:** se
+  o número de negativos **passar de 5**, **IA9 vira bloqueante** (proteção contra
+  erro de leitura ou de sinal). **Medido:** 1 caso — **Guamaré/RN (`2404507`),
+  2012 = −19.046 Mil Reais**.
+- **Tratamento dos símbolos (D11, alerta não bloqueante IA8):** `valor` igual a
+  um dos símbolos de ausência vira **NULL**; conta-se por ano. **Medido:** só
+  `...`, 15 células (2010/2011/2012, 5 municípios novos). Um `valor` que **não é
+  inteiro nem símbolo conhecido** (ex.: texto, decimal, símbolo fora da lista) é
+  **inválido → bloqueante (IB11)**: distingue ausência legítima de erro de
+  formato/extração.
+- **Faixas válidas (B5, D17):** `ano` em **2010–2021** (anos realmente baixados,
+  D11); **`pib_municipio` ≥ 0, exceto os negativos reais do SIDRA listados em
+  IA9**. `BIGINT` comporta o maior PIB municipal em Mil Reais com folga (SP 2021 =
+  828.980.747) e também valores negativos.
+- **Unidade mantida como na fonte (D9/D11/D15):** **Mil Reais**, preservada em
+  bronze e silver (**`BIGINT`, sem `DECIMAL`**) e registrada em
+  [`fontes-ibge.md`](fontes-ibge.md). A **conversão para reais / per capita é só
+  na gold**, com **comentário explícito** no código da gold. A silver **não
+  converte**.
+- **Critério de aceite de sanidade (D9/D11):** o PIB de **São Paulo
+  (`id_municipio = 3550308`) em 2021** = **828.980.747 Mil Reais** = **≈ R$ 828,98
+  bilhões**, compatível com a referência. Confirma a unidade **Mil Reais**.
 
 ### 5.3 `silver.ibge_dtb_municipio`
 
+**Layout real da bronze** (9 colunas, seção 3.3). A silver seleciona e renomeia:
+
 | Coluna silver | Origem (bronze) | Tipo | Observação |
 |---|---|---|---|
-| `id_municipio` | código do município | `VARCHAR` | 7 dígitos |
-| `sigla_uf` | UF | `VARCHAR` | 2 letras maiúsculas |
-| `nome_municipio` | nome | `VARCHAR` | rótulo descritivo (não é chave) |
-| `nome_regiao` | região/macrorregião | `VARCHAR` | uma de 5 regiões |
+| `id_municipio` | `Código Município Completo` | `VARCHAR` | 7 dígitos (chave) |
+| `cod_uf` | `UF` | `VARCHAR` | código numérico de 2 dígitos (ex.: `35`) |
+| `sigla_uf` | **derivada** de `UF` | `VARCHAR` | 2 letras maiúsculas (ver abaixo) |
+| `nome_uf` | `Nome_UF` | `VARCHAR` | ex.: `São Paulo` |
+| `nome_municipio` | `Nome_Município` | `VARCHAR` | rótulo descritivo (não é chave) |
+| `cod_regiao_intermediaria` | `Região Geográfica Intermediária` | `VARCHAR` | código |
+| `nome_regiao_intermediaria` | `Nome Região Geográfica Intermediária` | `VARCHAR` | rótulo |
+| `cod_regiao_imediata` | `Região Geográfica Imediata` | `VARCHAR` | código |
+| `nome_regiao_imediata` | `Nome Região Geográfica Imediata` | `VARCHAR` | rótulo |
+| `nome_regiao` | **derivada** do `cod_uf` | `VARCHAR` | macrorregião (uma de 5) |
 
-- **Pré-validação (regex):** `id_municipio` `^[0-9]{7}$`; `sigla_uf` `^[A-Z]{2}$`;
-  `nome_regiao` ∈ {Norte, Nordeste, Sudeste, Sul, Centro-Oeste} (**lista a
-  confirmar** conforme a grafia da fonte — com ou sem acento/hífen).
-- **Coerência de prefixo:** os 2 primeiros dígitos de `id_municipio` devem
-  corresponder ao código da `sigla_uf` (tabela de 27 códigos de UF do IBGE).
-  Divergência é **alerta** (seção 5.4), não bloqueante, porque a fonte é a
-  autoridade territorial.
-- **Linhas esperadas:** ~5.570 municípios da DTB 2025 (**número exato a confirmar
-  na extração**, seção 10).
+- **`sigla_uf` não existe no arquivo** (a DTB só traz o **código** da UF e o
+  `Nome_UF`). **Proposta (sem inventar):** derivar a sigla por um **mapa estático
+  dos 27 códigos de UF do IBGE** → sigla (11→RO, 12→AC, …, 35→SP, …, 53→DF),
+  embutido na silver como tabela de-para auditável. Alternativa equivalente:
+  mapear a partir de `Nome_UF` (27 nomes oficiais → sigla). **Nenhuma sigla é
+  adivinhada por município**: vem só do código/nome da UF, que a fonte garante.
+- **`nome_regiao` (macrorregião)** também **não** está no arquivo (a DTB traz
+  região **intermediária** e **imediata**, não Norte/Nordeste/…). Deriva-se do
+  **1º dígito do `cod_uf`** (1→Norte, 2→Nordeste, 3→Sudeste, 4→Sul, 5→Centro-
+  Oeste), no mesmo mapa estático das UFs.
+- **Colunas que a gold usará:** `id_municipio`, **`sigla_uf`** (ou `nome_uf`) e
+  **`nome_regiao`** (macrorregião) — é o que os marts por UF/região pedem
+  ([`fontes-ibge.md`](fontes-ibge.md)). As regiões intermediária/imediata ficam
+  disponíveis, mas nenhum mart atual as usa.
+- **Pré-validação (regex):** `id_municipio` `^[0-9]{7}$`; `cod_uf` `^[0-9]{2}$`;
+  `sigla_uf` `^[A-Z]{2}$`; `nome_regiao` ∈ {Norte, Nordeste, Sudeste, Sul,
+  Centro-Oeste} (grafia do mapa estático, com hífen em "Centro-Oeste").
+- **Coerência de prefixo:** os 2 primeiros dígitos de `id_municipio` devem bater
+  com o `cod_uf` da linha. Divergência é **alerta** (IA3), não bloqueante.
+- **Linhas esperadas: 5.571** (DTB 2025, D12) — 5.570 municípios instalados + 1
+  criado e ainda sem população (Boa Esperança do Norte/MT, `5101837`). Ver 9.3.
 
 ### 5.4 Alertas (modelo A1–A4 do SNIS)
 
@@ -285,22 +408,34 @@ Três níveis, como no SNIS: **bloqueante** (`ROLLBACK` + `sys.exit(1)`),
 | IB1 | tabela bronze correspondente ausente |
 | IB2 | valor que **não casa a regex** de pré-validação da coluna (antes do `CAST`) |
 | IB3 | valor que **não converte** para o tipo-alvo, ou **fora da faixa** do tipo |
-| IB4 | valor `DECIMAL` com **mais de 2 casas** no texto (só IBGE-PIB; regra B4) |
-| IB5 | `id_municipio` fora de `^[0-9]{7}$` |
+| IB5 | `id_municipio` fora de `^[0-9]{7}$` (ressalva POP: a 1 linha de id vazio é **excluída** antes, não bloqueia — IA6/IB9) |
 | IB6 | chave do grão **nula ou repetida** (`(ano, id_municipio)` para POP/PIB; `id_municipio` para DTB) |
 | IB7 | contagem de **linhas/colunas** diferente da bronze |
-| IB8 | valor **vazio (`''`) ou só espaços** em qualquer coluna (quebra do contrato da bronze) |
+| IB8 | valor **vazio (`''`) ou só espaços** em coluna obrigatória (quebra do contrato da bronze). **Exceções conhecidas (D13):** `populacao` nula (→ IA7/IB10) e `id_municipio` vazio na POP (→ IA6/IB9); `valor` do PIB com símbolo de ausência (→ IA8/IB11) |
+| IB9 | **(POP, D13)** linha sem `id_municipio` cujo `ano` está **dentro de 2010–2021** (fora da janela é só IA6) |
+| IB10 | **(POP, D13)** `populacao` nula em **2010–2021** (fora da janela é só IA7) |
+| IB11 | **(PIB, D11/D17)** `valor` que **não é inteiro com sinal (`^-?[0-9]+$`) nem símbolo de ausência conhecido** {`-`,`..`,`...`,`X`} |
+
+> **IB4 aposentada:** com o PIB do SIDRA em **Mil Reais inteiro** (seção 5.2),
+> não há casas decimais a checar; a antiga regra B4/IB4 não se aplica a esta
+> fonte.
 
 **Alertas não bloqueantes (fatos conhecidos; preservar o dado, imprimir
 contagem):**
 
 | # | Alerta | Fonte |
 |---|---|---|
-| IA1 | `ano` fora da **janela analítica 2010–2021** (série completa é mantida; só marcado) | POP, PIB |
-| IA2 | anos com **PIB retropolado** (2002–2009) | PIB |
-| IA3 | prefixo de `id_municipio` divergente da `sigla_uf` | DTB |
+| IA1 | `ano` fora da **janela analítica 2010–2021** (série completa é mantida; só marcado) | POP |
+| IA3 | prefixo de `id_municipio` divergente do `cod_uf`/`sigla_uf` | DTB |
 | IA4 | municípios da DTB **sem par** na silver SNIS, e vice-versa (alimenta a seção 8) | DTB/todas |
 | IA5 | **revisão de série de população** — diferença entre o valor ingerido de São Paulo (3550308) em 2021 e a referência IBGE **12.396.372** (seção 5.1); registrada no relatório | POP |
+| IA6 | **(D13)** linha sem `id_municipio` **excluída** da silver, **listada** (esperado: 1, ano 2025, pop. 5.877); só permitida fora de 2010–2021 (senão IB9) | POP |
+| IA7 | **(D13)** `populacao` nula, **contada por ano** (esperado: 533 em 1996, 1 em 2009; qualquer uma em 2010–2021 vira IB10) | POP |
+| IA8 | **(D11)** `valor` do PIB = símbolo de ausência → NULL, **contado por ano** (esperado: `...`, 15 células em 2010–2012) | PIB |
+| IA9 | **(D17)** `pib_municipio` **negativo**, preservado e **listado** `(id_municipio, ano, valor)` (esperado: 1 — Guamaré/RN, 2012, −19.046 Mil Reais); **vira bloqueante se > `PIB_NEGATIVOS_MAX` (5)** | PIB |
+
+> **IA2 aposentada:** a extração do PIB cobre **2010–2021** (D11), sem os anos
+> retropolados 2002–2009; não há mais o que marcar.
 
 > **Informação (só contar):** nulos por coluna, como no SNIS. Nenhum nulo é
 > preenchido.
@@ -313,20 +448,20 @@ contagem):**
 
 ## 6. Janela temporal
 
-- **Bronze e silver carregam a série completa** de cada fonte (POP 1991–2025;
-  PIB 2002–2021; DTB fotografia 2025). Nada é cortado na ingestão.
-- O recorte para **2010–2021 acontece só nos marts** (janela analítica do
-  catálogo, limitada pela série do PIB). Um `ano` fora dessa janela gera o
-  alerta **IA1**, não um bloqueio.
+- **Bronze e silver carregam a série baixada** de cada fonte (POP **1991–2025**;
+  PIB **2010–2021**; DTB fotografia **2025**). Nada é cortado na ingestão.
+- O PIB foi baixado já **restrito a 2010–2021** (D11), coincidindo com a janela
+  analítica. Só a POP tem anos fora da janela: um `ano` da POP fora de 2010–2021
+  gera o alerta **IA1**, não um bloqueio.
 - **D2:** 2021 é o ano de referência dos marts urbanos; **nenhum mart urbano usa
   2022**. Como o PIB vai só até 2021 e a série urbana do SNIS é nula em 2022,
   os marts 9 e 10 fecham naturalmente em 2010–2021.
 
 ### 6.1 Notas obrigatórias do PIB
 
-- **Retropolação 2002–2009:** esses anos foram recalculados para a série nova e
-  ficam marcados por **IA2**. Dentro da janela do projeto (2010–2021) não há
-  retropolação.
+- **Sem retropolação na extração:** a extração do PIB (SIDRA 5938, D11) começa em
+  **2010**, então os anos retropolados 2002–2009 **não entram**; o antigo alerta
+  IA2 foi aposentado (seção 5.4).
 - **2024 sem publicação regular:** não houve divulgação em 2024 por mudança de
   ano-base das Contas Nacionais; não afeta a janela 2010–2021, mas fica
   registrado.
@@ -376,6 +511,15 @@ DTB"**. O teste os **conta e lista**, mas eles **não** reprovam o critério.
 > fonte errada ou coluna trocada — daí o corte duro em 95%. A faixa 95–99%
 > absorve emancipações/vigência (D6) como alerta inspecionável.
 
+> **Limiares como constantes nomeadas (D7, provisório):** os cortes acima
+> (**99%** de alerta, **95%** bloqueante e o **máximo de 31 divergências** da
+> DTB) são **provisórios** e **devem ser constantes nomeadas no código** (ex.:
+> `COBERTURA_ALERTA = 0.99`, `COBERTURA_BLOQUEIO = 0.95`,
+> `DTB_MAX_DIVERGENCIAS = 31`), reunidas num único ponto e **fáceis de ajustar
+> após a primeira medição real**. Proibido espalhar números mágicos pelo código.
+> Revisar os valores depois da 1ª medição e registrar os definitivos em
+> [`decisoes.md`](decisoes.md) (D7).
+
 ---
 
 ## 8. Executor (`executar.py`)
@@ -400,8 +544,8 @@ silvers.
 - `tests/test_ibge_bronze.py` — espelho fiel das três bronzes (linhas/colunas vs.
   MANIFEST, tudo `VARCHAR`, idempotência).
 - `tests/test_ibge_silver.py` — tipos, renomeações, regex, faixas, chaves únicas,
-  `id_municipio` 7 dígitos, alertas IA1–IA5, as sanidades de São Paulo (P7, B8),
-  e o **critério de cobertura** da seção 7.
+  `id_municipio` 7 dígitos, alertas IA1 e IA3–IA8, as sanidades de São Paulo
+  (P7, B8), e o **critério de cobertura** da seção 7.
 
 ---
 
@@ -411,78 +555,113 @@ silvers.
 
 | # | Critério | Como verificar |
 |---|---|---|
-| P1 | linhas bronze = linhas silver = MANIFEST | `count(*)` igual nos três |
-| P2 | tipos | `ano` INTEGER, `id_municipio` VARCHAR, `populacao_total_ibge` INTEGER |
-| P3 | chave única | 0 duplicatas e 0 nulos em `(ano, id_municipio)` |
-| P4 | `id_municipio` | 100% casa `^[0-9]{7}$` |
-| P5 | faixa | `min(ano) ≥ 1991`, `max(ano) ≤ 2025`, `populacao_total_ibge ≥ 0` |
-| P6 | soma preservada | `sum(populacao)` da bronze (via `TRY_CAST`) = `sum(populacao_total_ibge)` da silver |
-| P7 | sanidade de série (não bloqueante) | São Paulo (3550308) em 2021 comparado a **12.396.372**; diferença registrada no relatório (IA5) |
+| P1 | linhas | bronze = **191.099** (MANIFEST); silver = 191.099 − 1 (linha de id vazio excluída, IA6) = **191.098** |
+| P2 | tipos | `ano` INTEGER, `id_municipio` VARCHAR, `populacao_total_ibge` INTEGER (aceita NULL) |
+| P3 | chave única | 0 duplicatas em `(ano, id_municipio)`; 0 `id_municipio` nulos **após** excluir a linha de id vazio (IA6) |
+| P4 | `id_municipio` | 100% casa `^[0-9]{7}$` (na silver, já sem a linha de id vazio) |
+| P5 | faixa | `min(ano)=1991`, `max(ano)=2025`; `populacao_total_ibge ≥ 0` **quando não nula** |
+| P6 | soma preservada | `sum(populacao)` da bronze (via `TRY_CAST`, ignorando nulos) = `sum(populacao_total_ibge)` da silver |
+| P7 | sanidade de série (não bloqueante) | São Paulo (3550308) em 2021 = **12.396.372** (diferença 0, IA5); 2010 = 11.253.503; 2022 = 11.451.999 |
+| P8 | nulos conhecidos (IA7) | `populacao` nula: **533 em 1996, 1 em 2009, 0 em 2010–2021** (qualquer nula em 2010–2021 → IB10) |
+| P9 | linha sem id (IA6) | exatamente **1** linha de `id_municipio` vazio, ano **2025** (fora de 2010–2021), excluída e listada |
 
 ### 9.2 `ibge_pib_municipio`
 
 | # | Critério | Como verificar |
 |---|---|---|
-| B1 | linhas bronze = silver = MANIFEST | `count(*)` |
-| B2 | tipos | `ano` INTEGER, `id_municipio` VARCHAR, `pib_municipio` DECIMAL(18,2) |
+| B1 | linhas bronze = silver = MANIFEST | `count(*)` = **66.840** (5.570 × 12) |
+| B2 | tipos | `ano` INTEGER, `id_municipio` VARCHAR, `pib_municipio` BIGINT (aceita NULL) |
 | B3 | chave única | 0 duplicatas/nulos em `(ano, id_municipio)` |
 | B4 | `id_municipio` 7 dígitos | 100% `^[0-9]{7}$` |
-| B5 | faixa | `min(ano) ≥ 2002`, `max(ano) ≤ 2021`, `pib_municipio ≥ 0` |
-| B6 | soma preservada | `sum(CAST(pib AS DECIMAL(38,6)))` igual em bronze e silver |
-| B7 | sem perda de casas | 0 linhas com `> 2` casas decimais no texto da bronze |
-| B8 | sanidade de unidade (D9) | São Paulo (3550308) em 2021 ≈ **R$ 828,98 bi** (≈ `828.980.000.000` em reais ou `828.980.000` em milhares); fixa a unidade registrada em `fontes-ibge.md` |
+| B5 | faixa | `min(ano)=2010`, `max(ano)=2021`; **`pib_municipio` ≥ 0, exceto os negativos reais do SIDRA listados em IA9** (D17) |
+| B6 | soma preservada | `sum(TRY_CAST(valor AS BIGINT))` da bronze (ignorando símbolos) = `sum(pib_municipio)` da silver |
+| B7 | símbolos de ausência (IA8) | `valor` = símbolo {`-`,`..`,`...`,`X`} → NULL; **esperado: `...`, 15 células em 2010–2012**; qualquer texto que não case `^-?[0-9]+$` nem seja símbolo → IB11 |
+| B9 | PIB negativo (IA9, D17) | `pib_municipio` < 0 preservado e listado; **esperado: 1** (Guamaré/RN `2404507`, 2012, −19.046 Mil Reais); **> `PIB_NEGATIVOS_MAX` (5)** → bloqueante |
+| B8 | sanidade de unidade (D9/D11) | São Paulo (3550308) em 2021 = **828.980.747 Mil Reais** ≈ **R$ 828,98 bi**; confirma a unidade **Mil Reais** em `fontes-ibge.md` |
 
 ### 9.3 `ibge_dtb_municipio`
 
 | # | Critério | Como verificar |
 |---|---|---|
-| D1 | linhas = MANIFEST (~5.570, **exato a confirmar**) | `count(*)` |
-| D2 | chave única | 0 duplicatas/nulos em `id_municipio` |
+| D1 | linhas = MANIFEST = **5.571** (D12) | `count(*)` = 5.571 (5.570 instalados + `5101837` Boa Esperança do Norte/MT, criado e sem população) |
+| D2 | chave única | 0 duplicatas/nulos em `id_municipio` (medido: 0 códigos repetidos) |
 | D3 | `id_municipio` 7 dígitos | 100% `^[0-9]{7}$` |
-| D4 | UF válida | `sigla_uf` ∈ as 27 UFs; `count(DISTINCT sigla_uf) = 27` |
-| D5 | região válida | `nome_regiao` ∈ as 5 regiões |
+| D4 | UF válida | `cod_uf` ∈ os 27 códigos; `sigla_uf` derivada ∈ as 27 UFs; `count(DISTINCT sigla_uf)=27` |
+| D5 | região válida | `nome_regiao` (derivada) ∈ as 5 macrorregiões |
 | D6 | cobertura SNIS→DTB | divergências ≤ 31 e todas na lista de ano único (seção 7.3) |
 
 ---
 
 ## 10. Suposições e pontos "a confirmar"
 
-As quatro grandes decisões desta spec foram **fechadas em D7–D10** (ver
-[`decisoes.md`](decisoes.md)). Ficam **a confirmar na 1ª extração**:
+As grandes decisões desta spec foram fechadas em **D7–D13** (ver
+[`decisoes.md`](decisoes.md)). A extração de **2026-11-08** resolveu os pontos
+antes em aberto:
 
-1. **Nomes de tabela/coluna na Base dos Dados** — `br_ibge_populacao.municipio`
-   (coluna de população), dataset/tabela do PIB (`br_ibge_pib.municipio`?) e,
-   **só se usar a alternativa** (D8), o diretório de municípios da DTB. **A
-   confirmar no BigQuery.**
-2. **Unidade do PIB** — reais ou milhares? Mantida como na fonte (D9) e
-   **registrada em `fontes-ibge.md`**; a sanidade de São Paulo (B8) decide qual é.
-3. **Nomes de coluna do relatório oficial da DTB 2025** (código do município, UF,
-   macrorregião, nome). **A confirmar na extração.**
-4. **Grafia de `nome_regiao`** — com acento/hífen ("Centro-Oeste" vs.
-   "Centro Oeste") conforme a fonte. **A confirmar na extração.**
-5. **Nº exato de municípios da DTB 2025** (~5.570). **A confirmar na extração.**
-6. **Encoding do arquivo oficial do IBGE** — provavelmente `latin-1`; converter
-   para utf-8 no passo de conversão (D8).
-7. **Semântica de `populacao` do IBGE-POP** — é a população residente **total**
-   (urbana + rural)? É o denominador dos marts 6–8. **A confirmar.**
-8. **Faixas de porte (mart 6)** — definidas pela população IBGE; os cortes são
-   decisão da gold, não desta spec.
+**Resolvidos na extração de 2026-11-08:**
+
+1. **Fonte/colunas da POP** — `br_ibge_populacao.municipio`, colunas `ano`,
+   `id_municipio`, `populacao`. ✅ confirmado.
+2. **Fonte e unidade do PIB** — **SIDRA 5938** via API `apisidra` (D11), variável
+   37, unidade **Mil Reais**; a Base dos Dados não foi usada. ✅ confirmado.
+3. **Colunas da DTB 2025** — 9 colunas (seção 3.3); não há sigla da UF nem
+   macrorregião no arquivo (derivadas na silver, seção 5.3). ✅ confirmado.
+4. **Grafia de `nome_regiao`** — a macrorregião é **derivada** (mapa estático),
+   grafia **"Centro-Oeste"** com hífen. ✅ resolvido por derivação.
+5. **Nº de municípios da DTB 2025** — **5.571** (D12), não ~5.570. ✅ confirmado.
+6. **Encoding** — CSVs já gravados em **UTF-8** no passo de conversão/montagem. ✅.
+7. **Semântica de `populacao` do IBGE-POP (D14)** — é a **população residente
+   total (urbana + rural)**, referência **1º de julho**; **não** é a
+   `populacao_urbana` do SNIS. Denominador dos marts 6–8. ✅ **fechado em D14.**
+8. **Faixas de porte (mart 6) (D16)** — cortes definidos, **medidos pela
+   população de 2021**: até 5 mil · 5 a 20 mil · 20 a 50 mil · 50 a 100 mil ·
+   100 a 500 mil · acima de 500 mil habitantes. Regra da **gold** (não afeta esta
+   ingestão). ✅ **fechado em D16.**
+
+**Ainda a confirmar (não dependem da extração):** nenhum item em aberto nesta
+spec; os pontos 7 e 8 foram fechados por D14 e D16.
 
 ---
 
-## 11. Decisões aplicadas (D7–D10, APROVADAS em 2026-11-08)
+## 11. Decisões aplicadas (D7–D17, APROVADAS em 2026-11-08)
 
 Esta spec já incorpora as decisões abaixo; não há mais escolhas pendentes com você.
 
 - **D7 — limiares de cobertura (provisórios):** por ano, **alerta < 99%**,
-  **bloqueante < 95%**; DTB **≤ 31 divergências**. **Revisar após a 1ª medição
-  real** e registrar o valor final em `decisoes.md` (seção 7.3).
+  **bloqueante < 95%**; DTB **≤ 31 divergências**. Devem ser **constantes
+  nomeadas no código**, num só ponto, fáceis de ajustar (seção 7.3). **Revisar
+  após a 1ª medição real** e registrar o valor final em `decisoes.md`.
 - **D8 — DTB pelo arquivo oficial do IBGE** (relatório de municípios DTB 2025),
   original preservado em `data/raw/ibge/dtb/` e conversão para CSV documentada à
   parte; Base dos Dados só como alternativa com versão documentada (seção 3.3).
 - **D9 — unidade do PIB como na fonte**, registrada em `fontes-ibge.md`;
   conversão só na gold. Sanidade: São Paulo 2021 ≈ R$ 828,98 bi (B8).
 - **D10 — coluna de população = `populacao_total_ibge`** (seções 5.1 e 9.1).
+- **D11 — PIB do SIDRA 5938 (API `apisidra`), em Mil Reais**, anos 2010–2021;
+  símbolos de ausência {`-`,`..`,`...`,`X`} → NULL com alerta IA8; valor não
+  inteiro nem símbolo conhecido é bloqueante (IB11). Base dos Dados como
+  alternativa **não usada** (seções 3.2 e 5.2).
+- **D12 — DTB tem 5.571 linhas** (critério de aceite D1): a linha extra vs. 5.570
+  é **`5101837` Boa Esperança do Norte/MT**, município criado e ainda sem
+  população estimada; não é duplicata nem erro (seções 3.3 e 9.3).
+- **D13 — nulos e linha sem id da população:** população nula permitida com IA7
+  (533 em 1996, 1 em 2009; nula em 2010–2021 → IB10); linha sem `id_municipio`
+  excluída da silver com IA6 (1 linha, ano 2025; dentro de 2010–2021 → IB9).
+  Quebra de série 2021→2022 (Censo 2022) registrada como ressalva no catálogo
+  (seções 5.1 e 5.4).
+- **D14 — `populacao` do IBGE-POP = população residente total** (urbana + rural),
+  referência **1º de julho**; **não** é a `populacao_urbana` do SNIS. Denominador
+  dos marts 6–8 (seções 0, 5.1 e [`fontes-ibge.md`](fontes-ibge.md)).
+- **D15 — PIB da silver em `BIGINT` em Mil Reais** (sem `DECIMAL`); conversão
+  para reais só na gold, com comentário explícito (seção 5.2).
+- **D16 — faixas de porte do mart 6** (regra da **gold**, não desta ingestão),
+  medidas na população de **2021**: até 5 mil · 5 a 20 mil · 20 a 50 mil · 50 a
+  100 mil · 100 a 500 mil · acima de 500 mil habitantes (seção 10).
+- **D17 — PIB municipal pode ser negativo**, preservado na silver com alerta
+  **IA9**; regex `^-?[0-9]+$`; B5 = "≥ 0 exceto negativos reais do SIDRA listados
+  em IA9". Constante **`PIB_NEGATIVOS_MAX = 5`**: acima disso IA9 bloqueia. Medido:
+  1 caso (Guamaré/RN, 2012, −19.046 Mil Reais) (seções 5.2 e 9.2). Marts 9/10: PIB
+  per capita negativo permanece, cai no menor quartil, sem log (indicadores.md).
 
 ### Pendência a reabrir depois
 - **D7 provisória:** depois da primeira medição real de cobertura, revisar os
@@ -490,38 +669,37 @@ Esta spec já incorpora as decisões abaixo; não há mais escolhas pendentes co
 
 ---
 
-## 12. Passo a passo: o que baixar, onde salvar e com que nome
+## 12. Downloads — estado real (extração 2026-11-08)
 
-`<data>` = data da extração no formato `AAAA-MM-DD` (a mesma em todos os
-arquivos de uma rodada). Nunca editar nada dentro de `data/raw/` depois de salvo.
+As três fontes **já foram baixadas** na rodada de **2026-11-08**; cada pasta tem
+seu `MANIFEST.md`. Nada em `data/raw/` é editado depois de salvo. Para uma
+re-extração futura, repetir o procedimento numa pasta `AAAA-MM-DD` nova.
 
-### 12.1 IBGE-POP (população)
-1. Exportar a série completa da Base dos Dados (`br_ibge_populacao.municipio`)
-   como CSV.
-2. Salvar em: `data/raw/ibge/populacao/<data>/`
-   - arquivo: **`populacao_municipio.csv`**
-   - manifesto: **`MANIFEST.md`** (origem, URL/consulta, data, nº de linhas,
-     nº de colunas, checksum `sha256`).
+| Fonte | Pasta | Arquivos | Estado |
+|---|---|---|---|
+| IBGE-POP | `data/raw/ibge/populacao/2026-11-08/` | `populacao_municipio.csv`, `MANIFEST.md` | ✅ baixado |
+| IBGE-PIB | `data/raw/ibge/pib/2026-11-08/` | `pib_municipio.csv`, 12× `pib_5938_<ANO>.json`, `MANIFEST.md` | ✅ baixado |
+| IBGE-DTB | `data/raw/ibge/dtb/2026-11-08/` | `DTB_2025.zip` (original), `dtb_municipio.csv`, `MANIFEST.md` | ✅ baixado |
 
-### 12.2 IBGE-PIB
-1. Exportar a série 2002–2021 da Base dos Dados (`br_ibge_pib.municipio`) como CSV.
-2. Salvar em: `data/raw/ibge/pib/<data>/`
-   - arquivo: **`pib_municipio.csv`**
-   - manifesto: **`MANIFEST.md`** (inclua a **unidade do PIB** encontrada —
-     reais ou milhares — conferida pela sanidade de São Paulo, D9/B8).
+### 12.1 IBGE-POP (população) — **feito**
+- Exportado da Base dos Dados (`br_ibge_populacao.municipio`) pelo console do
+  BigQuery → `populacao_municipio.csv` (3 colunas, 191.099 linhas, UTF-8).
+- `MANIFEST.md` com origem, consulta, data, linhas, colunas, `sha256`, anos e as
+  peculiaridades (nulos, linha sem id).
 
-### 12.3 IBGE-DTB 2025 (arquivo oficial, D8)
-1. Baixar o **relatório de municípios da DTB 2025** do site do IBGE
-   (`.../divisao-territorial-brasileira.html`). **Preservar o original** sem
-   alterar.
-2. Salvar o original em: `data/raw/ibge/dtb/<data>/`
-   - arquivo original: **mantido com o nome/extensão de origem** (ex.
-     `RELATORIO_DTB_BRASIL_2025_MUNICIPIOS.xls` ou o `.zip` baixado).
-3. **Converter para CSV como passo separado** (documentar no MANIFEST a
-   ferramenta, a aba, o encoding e as colunas) e salvar na **mesma pasta**:
-   - CSV convertido: **`dtb_municipio.csv`**
-   - manifesto: **`MANIFEST.md`** (origem = IBGE DTB 2025, URL, data, versão
-     2025, nº de linhas, checksum do original **e** do CSV, passos da conversão).
+### 12.2 IBGE-PIB — **feito** (SIDRA 5938, D11)
+- Baixado da **API `apisidra` (SIDRA 5938)**, variável 37, nível `n6`,
+  **ano a ano (2010–2021)** → 12× `pib_5938_<ANO>.json` (parciais preservados),
+  montados em `pib_municipio.csv` (6 colunas, 66.840 linhas, **Mil Reais**).
+- `MANIFEST.md` com URLs, `sha256` de cada parcial e do CSV, unidade e montagem.
+
+### 12.3 IBGE-DTB 2025 (arquivo oficial, D8) — **feito**
+- Baixado `DTB_2025.zip` de `geoftp.ibge.gov.br` (página oficial deu HTTP 403);
+  original preservado.
+- Convertido para `dtb_municipio.csv` (pandas + `xlrd`, aba `DTB_Municípios`,
+  9 colunas, 5.571 linhas, UTF-8) como passo separado documentado no MANIFEST.
+- `MANIFEST.md` com origem, URL, data, versão 2025, linhas, `sha256` do zip **e**
+  do CSV, e os passos da conversão.
 
 ### 12.4 Checklist de MANIFEST (as três pastas)
 Cada `MANIFEST.md` deve trazer: **origem/URL**, **data de extração**, **nº de
