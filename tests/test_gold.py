@@ -1839,3 +1839,529 @@ def test_m8_sql_sem_rascunho():
     ).read_text(encoding="utf-8")
     for marcador in ("TODO", "FIXME", "XXX", "rascunho", "placeholder"):
         assert marcador.lower() not in sql.lower()
+
+
+# ===========================================================================
+# Mart 9 — gold.atendimento_vs_pib_2021 (spec-gold.md §2, ficha Mart 9)
+# D2/D15/D17/D28/D32. Grão: município, 2021. Universo: SNIS água urbana +
+# PIB + pop = 5.302. Expectativas confirmadas no MCP/SELECT (2026-11-08).
+# ===========================================================================
+
+M9 = "gold.atendimento_vs_pib_2021"
+
+M9_LINHAS = 5_302
+M9_INFORMANTES_ESGOTO = 2_771
+M9_SIGMA_POP_5570 = 213_317_639  # Σ pop IBGE 2021 (todos os 5.570)
+M9_PPC_NACIONAL = 42_247.52  # Σ PIB × 1000 / Σ pop (5.570), R$/hab
+M9_AGUA_NAC_2021 = 93.4469  # raw (inclui >100%); bate com o mart 1 (93,4%)
+M9_ESGOTO_INFORMANTES_2021 = 72.4695  # raw, entre informantes (num E den)
+M9_A100_AGUA = 18  # cobertura água > 100% (= exclusões A2 do mart 1 em 2021)
+M9_A100_ESGOTO = 7  # cobertura esgoto > 100%
+M9_ATIPICOS_2021 = 5  # investimento_atipico (= mart 5, ano 2021)
+M9_FORA_UNIVERSO = 268  # municípios com pop+PIB sem água urbana informada
+M9_FORA_POP = 3_304_102  # população desses 268 (Σ pop 5570 − Σ pop 5302)
+
+
+def test_m9_linhas_pk_colunas(gold_db):
+    """5.302 linhas, PK id_municipio única, 13 colunas."""
+    con = _ro(gold_db)
+    try:
+        linhas, pk = con.execute(
+            f"SELECT count(*), count(DISTINCT id_municipio) FROM {M9}"
+        ).fetchone()
+        cols = con.execute(
+            "SELECT count(*) FROM duckdb_columns() "
+            "WHERE schema_name = 'gold' AND table_name = 'atendimento_vs_pib_2021'"
+        ).fetchone()[0]
+    finally:
+        con.close()
+    assert linhas == M9_LINHAS
+    assert pk == M9_LINHAS  # PK única
+    assert cols == 13
+
+
+def test_m9_conversao_pib_per_capita(gold_db):
+    """D15: PIB em Mil Reais × 1000; PIB per capita nacional = R$ 42.247,52.
+
+    Reconstruído da silver (Σ PIB × 1000 / Σ pop, 5.570 municípios), fonte
+    independente do mart; e Σ pop dos 5.570 = 213.317.639.
+    """
+    con = _ro(gold_db)
+    try:
+        sigma_pop, ppc = con.execute(
+            """
+            SELECT sum(po.populacao_total_ibge),
+                   sum(p.pib_municipio) * 1000.0 / sum(po.populacao_total_ibge)
+            FROM silver.ibge_pib_municipio p
+            JOIN silver.ibge_populacao_municipio po USING (id_municipio)
+            WHERE p.ano = 2021 AND po.ano = 2021
+            """
+        ).fetchone()
+        # sanidade da coluna do mart: PIB per capita de SP (3550308)
+        ppc_sp = con.execute(
+            f"SELECT pib_per_capita FROM {M9} WHERE id_municipio = '3550308'"
+        ).fetchone()[0]
+    finally:
+        con.close()
+    assert int(sigma_pop) == M9_SIGMA_POP_5570
+    assert round(float(ppc), 2) == M9_PPC_NACIONAL
+    # SP: 828.980.747 Mil Reais × 1000 / pop IBGE -> R$/hab plausível (> 60 mil)
+    assert ppc_sp > 60_000
+
+
+def test_m9_sem_pib_negativo_2021(gold_db):
+    """D17: 0 PIB per capita negativo em 2021 (Guamaré voltou a positivo)."""
+    con = _ro(gold_db)
+    try:
+        neg = con.execute(
+            f"SELECT count(*) FROM {M9} WHERE pib_per_capita < 0"
+        ).fetchone()[0]
+    finally:
+        con.close()
+    assert neg == 0
+
+
+def test_m9_agua_nacional_2021(gold_db):
+    """Água urbana nacional (raw, Σ/Σ sobre os 5.302) = 93,45%; bate com o mart 1.
+
+    Reconstruído da silver (universo do mart 9); inclui as linhas > 100% (D32),
+    como o valor do mart é preservado sem clamp.
+    """
+    con = _ro(gold_db)
+    try:
+        agua = con.execute(
+            """
+            SELECT 100.0 * sum(s.populacao_urbana_atendida_agua)
+                 / sum(s.populacao_urbana)
+            FROM silver.municipio_agua_esgoto s
+            JOIN silver.ibge_pib_municipio p
+              ON p.id_municipio = s.id_municipio AND p.ano = 2021
+            WHERE s.ano = 2021 AND s.populacao_urbana > 0
+              AND s.populacao_urbana_atendida_agua IS NOT NULL
+            """
+        ).fetchone()[0]
+    finally:
+        con.close()
+    assert round(float(agua), 4) == M9_AGUA_NAC_2021
+    assert round(float(agua), 1) == 93.4  # mesmo nacional do mart 1
+
+
+def test_m9_esgoto_entre_informantes_bate_mart1(gold_db):
+    """Esgoto urbano é 'entre informantes' (2.771 de 5.302); mesmo viés do mart 1.
+
+    - O nacional raw do mart 9 (inclui >100%) = 72,47%.
+    - Na MESMA convenção do mart 1 (exclui atendida > residente), o nacional do
+      mart 9 (universo 5.302) e o do mart 1 (universo total) coincidem — a prova
+      de que ambos medem só entre informantes de esgoto. PENDÊNCIA registrada na
+      ficha: o % de esgoto urbano cobre só os informantes, não toda a população
+      urbana (o mart 1 NÃO é reaberto aqui).
+    """
+    con = _ro(gold_db)
+    try:
+        informantes = con.execute(
+            f"SELECT count(*) FROM {M9} WHERE informou_esgoto"
+        ).fetchone()[0]
+        # raw, entre informantes (num E den não nulos), reconstruído da silver
+        esg_raw = con.execute(
+            """
+            SELECT 100.0 * sum(num) / sum(den) FROM (
+              SELECT s.populacao_urbana_atendida_esgoto AS num,
+                     s.populacao_urbana_residente_esgoto AS den
+              FROM silver.municipio_agua_esgoto s
+              JOIN silver.ibge_pib_municipio p
+                ON p.id_municipio = s.id_municipio AND p.ano = 2021
+              WHERE s.ano = 2021 AND s.populacao_urbana > 0
+                AND s.populacao_urbana_atendida_agua IS NOT NULL
+                AND s.populacao_urbana_atendida_esgoto IS NOT NULL
+                AND s.populacao_urbana_residente_esgoto IS NOT NULL)
+            """
+        ).fetchone()[0]
+        # convenção do mart 1 (exclui a2) — mart 9 (universo 5.302)
+        esg_m9_excl = con.execute(
+            """
+            SELECT 100.0 * sum(num) / sum(den) FROM (
+              SELECT s.populacao_urbana_atendida_esgoto AS num,
+                     s.populacao_urbana_residente_esgoto AS den
+              FROM silver.municipio_agua_esgoto s
+              JOIN silver.ibge_pib_municipio p
+                ON p.id_municipio = s.id_municipio AND p.ano = 2021
+              WHERE s.ano = 2021 AND s.populacao_urbana > 0
+                AND s.populacao_urbana_atendida_agua IS NOT NULL
+                AND s.populacao_urbana_atendida_esgoto IS NOT NULL
+                AND s.populacao_urbana_residente_esgoto IS NOT NULL
+                AND s.populacao_urbana_atendida_esgoto <= s.populacao_urbana_residente_esgoto)
+            """
+        ).fetchone()[0]
+        # convenção do mart 1 — universo total (o próprio mart 1)
+        esg_m1_excl = con.execute(
+            """
+            SELECT 100.0 * sum(num) / sum(den) FROM (
+              SELECT s.populacao_urbana_atendida_esgoto AS num,
+                     s.populacao_urbana_residente_esgoto AS den
+              FROM silver.municipio_agua_esgoto s
+              JOIN silver.ibge_dtb_municipio d ON d.id_municipio = s.id_municipio
+              WHERE s.ano = 2021
+                AND s.populacao_urbana_atendida_esgoto IS NOT NULL
+                AND s.populacao_urbana_residente_esgoto IS NOT NULL
+                AND s.populacao_urbana_atendida_esgoto <= s.populacao_urbana_residente_esgoto)
+            """
+        ).fetchone()[0]
+    finally:
+        con.close()
+    assert informantes == M9_INFORMANTES_ESGOTO
+    assert round(float(esg_raw), 4) == M9_ESGOTO_INFORMANTES_2021
+    # mesmo viés: na convenção do mart 1, mart 9 e mart 1 batem (≤ 0,01 pp)
+    assert abs(float(esg_m9_excl) - float(esg_m1_excl)) < 0.01
+
+
+def test_m9_cobertura_acima_100_sinalizada(gold_db):
+    """D32: cobertura > 100% preservada no valor e sinalizada (18 água, 7 esgoto).
+
+    A flag casa exatamente com o valor bruto (> 100 <=> flag verdadeira).
+    """
+    con = _ro(gold_db)
+    try:
+        a100_agua, a100_esg = con.execute(
+            f"""
+            SELECT count(*) FILTER (WHERE cobertura_urbana_agua_acima_100),
+                   count(*) FILTER (WHERE cobertura_urbana_esgoto_acima_100)
+            FROM {M9}
+            """
+        ).fetchone()
+        # identidade flag <=> valor > 100 (valor preservado, sem clamp)
+        incoerentes = con.execute(
+            f"""
+            SELECT count(*) FROM {M9}
+            WHERE cobertura_urbana_agua_acima_100 <> (cobertura_urbana_agua > 100.0)
+               OR coalesce(cobertura_urbana_esgoto_acima_100
+                           <> (cobertura_urbana_esgoto > 100.0), false)
+            """
+        ).fetchone()[0]
+        maior_agua = con.execute(
+            f"SELECT max(cobertura_urbana_agua) FROM {M9}"
+        ).fetchone()[0]
+    finally:
+        con.close()
+    assert a100_agua == M9_A100_AGUA
+    assert a100_esg == M9_A100_ESGOTO
+    assert incoerentes == 0
+    assert maior_agua > 100.0  # valor original mantido (sem clamp)
+
+
+def test_m9_esgoto_nulo_para_nao_informante(gold_db):
+    """Esgoto nulo (não zero) para quem não informa; informou_esgoto coerente."""
+    con = _ro(gold_db)
+    try:
+        incoerentes = con.execute(
+            f"""
+            SELECT count(*) FROM {M9}
+            WHERE informou_esgoto <> (cobertura_urbana_esgoto IS NOT NULL)
+            """
+        ).fetchone()[0]
+        nulos = con.execute(
+            f"SELECT count(*) FROM {M9} WHERE cobertura_urbana_esgoto IS NULL"
+        ).fetchone()[0]
+    finally:
+        con.close()
+    assert incoerentes == 0
+    assert nulos == M9_LINHAS - M9_INFORMANTES_ESGOTO
+
+
+def test_m9_investimento_atipico_igual_mart5(gold_db):
+    """D28: investimento_atipico com o predicado exato do mart 5; 2021 = 5 casos."""
+    con = _ro(gold_db)
+    try:
+        m9 = con.execute(
+            f"SELECT count(*) FILTER (WHERE investimento_atipico) FROM {M9}"
+        ).fetchone()[0]
+        m5 = con.execute(
+            "SELECT sum(municipios_investimento_atipico) "
+            "FROM gold.financeiro_uf_ano WHERE ano = 2021"
+        ).fetchone()[0]
+    finally:
+        con.close()
+    assert m9 == M9_ATIPICOS_2021
+    assert int(m5) == M9_ATIPICOS_2021  # mesmo número do mart 5 em 2021
+
+
+def test_m9_fora_do_universo(gold_db):
+    """268 municípios com pop+PIB mas sem água urbana informada = 3.304.102 hab."""
+    con = _ro(gold_db)
+    try:
+        munis, pop = con.execute(
+            """
+            WITH snis AS (
+              SELECT DISTINCT id_municipio FROM silver.municipio_agua_esgoto
+              WHERE ano = 2021 AND populacao_urbana > 0
+                AND populacao_urbana_atendida_agua IS NOT NULL)
+            SELECT count(*), sum(po.populacao_total_ibge)
+            FROM silver.ibge_populacao_municipio po
+            JOIN silver.ibge_pib_municipio p
+              ON p.id_municipio = po.id_municipio AND p.ano = 2021
+            WHERE po.ano = 2021
+              AND po.id_municipio NOT IN (SELECT id_municipio FROM snis)
+            """
+        ).fetchone()
+    finally:
+        con.close()
+    assert munis == M9_FORA_UNIVERSO
+    assert int(pop) == M9_FORA_POP
+
+
+def test_m9_sql_sem_rascunho():
+    """O SQL do mart 9 não traz marcadores de rascunho (TODO/FIXME/XXX/rascunho)."""
+    import pathlib
+
+    sql = (
+        pathlib.Path(gold_mod.__file__).resolve().parent.parent
+        / "sql"
+        / "gold"
+        / "09_atendimento_vs_pib_2021.sql"
+    ).read_text(encoding="utf-8")
+    for marcador in ("TODO", "FIXME", "XXX", "rascunho", "placeholder"):
+        assert marcador.lower() not in sql.lower()
+
+
+# ===========================================================================
+# Mart 10 — gold.avanco_por_renda_painel (spec-gold.md §2, ficha Mart 10)
+# D33 (água-only + medida principal), D19/D24 (painel 4.472), D15/D17.
+# Grão: (quartil_pib, ano), ano ∈ {2010, 2021} = 8 linhas. Painel urbano de água
+# fixo = 4.472; quartil ntile(4) nacional base 2021, fixo. Valores confirmados
+# no MCP/SELECT (2026-11-08).
+# ===========================================================================
+
+M10 = "gold.avanco_por_renda_painel"
+
+M10_LINHAS = 8
+M10_PAINEL = 4_472
+M10_FORA = 1_098
+M10_POR_QUARTIL = 1_118
+M10_PAINEL_SEM_A2 = 4_431  # = mart 4 (4.472 − 41 violações A2)
+M10_SIGMA_POP_5570 = 213_317_639  # Σ pop IBGE 2021 (nacional)
+
+# CTE do painel + quartil, reconstruído da silver (fonte independente do mart).
+_M10_BASE = """
+WITH painel AS (
+  SELECT id_municipio FROM silver.municipio_agua_esgoto
+  WHERE ano BETWEEN 2010 AND 2021
+    AND populacao_urbana_atendida_agua IS NOT NULL
+    AND populacao_urbana IS NOT NULL
+  GROUP BY id_municipio HAVING count(DISTINCT ano) = 12
+),
+per_capita AS (
+  SELECT p.id_municipio,
+         pib.pib_municipio * 1000.0 / nullif(po.populacao_total_ibge, 0) AS ppc
+  FROM painel p
+  JOIN silver.ibge_pib_municipio pib ON pib.id_municipio = p.id_municipio AND pib.ano = 2021
+  JOIN silver.ibge_populacao_municipio po ON po.id_municipio = p.id_municipio AND po.ano = 2021
+),
+quartis AS (
+  SELECT id_municipio, ppc, ntile(4) OVER (ORDER BY ppc) AS quartil_pib FROM per_capita
+)
+"""
+
+# cobertura (2010, 2021) e cortes ppc (min, max) confirmados, por quartil.
+M10_COB = {
+    1: (80.0312, 82.6306),
+    2: (86.3666, 87.1560),
+    3: (91.1842, 92.8405),
+    4: (96.7898, 97.8490),
+}
+M10_VAR_PP = {1: 2.5994, 2: 0.7894, 3: 1.6563, 4: 1.0592}
+M10_RED_DEF = {1: 13.0174, 2: 5.7900, 3: 18.7883, 4: 32.9942}
+M10_PPC_CORTES = {
+    1: (5_731, 13_140),
+    2: (13_144, 23_850),
+    3: (23_863, 40_996),
+    4: (41_005, 920_828),
+}
+M10_PAINEL_COB = (92.1737, 93.5229)  # cobertura do painel inteiro (2010, 2021)
+
+
+def test_m10_linhas_pk_colunas(gold_db):
+    """8 linhas, PK (quartil_pib, ano) única, 6 colunas."""
+    con = _ro(gold_db)
+    try:
+        linhas, pk = con.execute(
+            f"SELECT count(*), count(DISTINCT (quartil_pib, ano)) FROM {M10}"
+        ).fetchone()
+        cols = con.execute(
+            "SELECT count(*) FROM duckdb_columns() "
+            "WHERE schema_name = 'gold' AND table_name = 'avanco_por_renda_painel'"
+        ).fetchone()[0]
+        anos = con.execute(f"SELECT DISTINCT ano FROM {M10} ORDER BY ano").fetchall()
+    finally:
+        con.close()
+    assert linhas == M10_LINHAS
+    assert pk == M10_LINHAS  # PK (quartil_pib, ano) única
+    assert cols == 6
+    assert [a[0] for a in anos] == [2010, 2021]
+
+
+def test_m10_painel_4472_e_fora(gold_db):
+    """Σ municipios_painel por ano = 4.472; 1.098 fora; Σ pop = 213.317.639."""
+    con = _ro(gold_db)
+    try:
+        por_ano = con.execute(
+            f"SELECT ano, sum(municipios_painel) FROM {M10} GROUP BY ano ORDER BY ano"
+        ).fetchall()
+        n_painel = con.execute(_M10_BASE + "SELECT count(*) FROM painel").fetchone()[0]
+        sigma_pop, fora = con.execute(
+            _M10_BASE
+            + """
+            SELECT sum(po.populacao_total_ibge),
+                   count(*) FILTER (WHERE po.id_municipio NOT IN (SELECT id_municipio FROM painel))
+            FROM silver.ibge_populacao_municipio po WHERE po.ano = 2021
+            """
+        ).fetchone()
+    finally:
+        con.close()
+    assert [v for _, v in por_ano] == [M10_PAINEL, M10_PAINEL]
+    assert n_painel == M10_PAINEL
+    assert int(sigma_pop) == M10_SIGMA_POP_5570
+    assert fora == M10_FORA
+
+
+def test_m10_quartis_1118_e_cortes(gold_db):
+    """Cada quartil = 1.118 municípios; cortes do PIB per capita confirmados."""
+    con = _ro(gold_db)
+    try:
+        por_ano = con.execute(
+            f"SELECT quartil_pib, ano, municipios_painel FROM {M10} ORDER BY 1, 2"
+        ).fetchall()
+        cortes = con.execute(
+            _M10_BASE + "SELECT quartil_pib, count(*), min(ppc), max(ppc) "
+            "FROM quartis GROUP BY quartil_pib ORDER BY quartil_pib"
+        ).fetchall()
+    finally:
+        con.close()
+    # municipios_painel = 1.118 em toda linha (nos dois anos)
+    for _, _, muni in por_ano:
+        assert muni == M10_POR_QUARTIL
+    for q, n, pmin, pmax in cortes:
+        assert n == M10_POR_QUARTIL
+        assert round(pmin) == M10_PPC_CORTES[q][0]
+        assert round(pmax) == M10_PPC_CORTES[q][1]
+
+
+def test_m10_cobertura_por_quartil(gold_db):
+    """Cobertura urbana de água por quartil nos dois anos (soma/soma)."""
+    con = _ro(gold_db)
+    try:
+        linhas = con.execute(
+            f"SELECT quartil_pib, ano, cobertura_urbana_agua FROM {M10} ORDER BY 1, 2"
+        ).fetchall()
+    finally:
+        con.close()
+    for q, ano, cob in linhas:
+        esperado = M10_COB[q][0] if ano == 2010 else M10_COB[q][1]
+        assert cob == pytest.approx(esperado, abs=0.01)
+
+
+def test_m10_avanco_pp_e_reducao_deficit(gold_db):
+    """Medida principal (variacao_pp) e apoio (reducao_relativa_deficit) por quartil.
+
+    Ambas são atributos do quartil: repetem-se idênticas nas duas linhas de ano
+    (prova o quartil fixo — mesma composição em 2010 e 2021).
+    """
+    con = _ro(gold_db)
+    try:
+        linhas = con.execute(
+            f"SELECT quartil_pib, ano, variacao_pp, reducao_relativa_deficit "
+            f"FROM {M10} ORDER BY 1, 2"
+        ).fetchall()
+    finally:
+        con.close()
+    por_q = {}
+    for q, ano, var, red in linhas:
+        assert var == pytest.approx(M10_VAR_PP[q], abs=0.01)
+        assert red == pytest.approx(M10_RED_DEF[q], abs=0.01)
+        por_q.setdefault(q, []).append((var, red))
+    # mesma medida nas duas linhas de ano de cada quartil (repetição = quartil fixo)
+    for q, vals in por_q.items():
+        assert len(vals) == 2
+        assert vals[0] == vals[1]
+
+
+def test_m10_painel_nacional_e_consistencia_var(gold_db):
+    """Cobertura do painel inteiro (2010/2021) e variacao_pp = 2021 − 2010."""
+    con = _ro(gold_db)
+    try:
+        cob10, cob21 = con.execute(
+            _M10_BASE
+            + """
+            SELECT 100.0 * sum(CASE WHEN s.ano = 2010 THEN s.populacao_urbana_atendida_agua END)
+                         / sum(CASE WHEN s.ano = 2010 THEN s.populacao_urbana END),
+                   100.0 * sum(CASE WHEN s.ano = 2021 THEN s.populacao_urbana_atendida_agua END)
+                         / sum(CASE WHEN s.ano = 2021 THEN s.populacao_urbana END)
+            FROM quartis q
+            JOIN silver.municipio_agua_esgoto s ON s.id_municipio = q.id_municipio
+            WHERE s.ano IN (2010, 2021)
+            """
+        ).fetchone()
+        linhas = con.execute(
+            f"SELECT quartil_pib, "
+            f"max(CASE WHEN ano=2021 THEN cobertura_urbana_agua END) "
+            f"- max(CASE WHEN ano=2010 THEN cobertura_urbana_agua END), "
+            f"max(variacao_pp) FROM {M10} GROUP BY quartil_pib"
+        ).fetchall()
+    finally:
+        con.close()
+    assert cob10 == pytest.approx(M10_PAINEL_COB[0], abs=0.01)
+    assert cob21 == pytest.approx(M10_PAINEL_COB[1], abs=0.01)
+    # a variacao_pp da tabela = diferença das coberturas das duas linhas
+    for _, dif, var in linhas:
+        assert var == pytest.approx(dif, abs=1e-9)
+
+
+def test_m10_pib_negativo_quartil1_zero_2021(gold_db):
+    """D17: 0 PIB per capita negativo no Q1 em base 2021 (regra registrada)."""
+    con = _ro(gold_db)
+    try:
+        negativos = con.execute(
+            _M10_BASE + "SELECT count(*) FROM quartis WHERE quartil_pib = 1 AND ppc < 0"
+        ).fetchone()[0]
+    finally:
+        con.close()
+    assert negativos == 0
+
+
+def test_m10_painel_sem_a2_igual_mart4(gold_db):
+    """Painel menos as violações A2 = 4.431 = linhas do mart 4 (sensibilidade)."""
+    con = _ro(gold_db)
+    try:
+        sem_a2 = con.execute(
+            _M10_BASE
+            + """
+            , a2 AS (
+              SELECT s.id_municipio,
+                bool_or(s.ano IN (2010, 2021)
+                        AND s.populacao_urbana_atendida_agua > s.populacao_urbana) AS viola
+              FROM silver.municipio_agua_esgoto s
+              JOIN painel p ON p.id_municipio = s.id_municipio
+              WHERE s.ano IN (2010, 2021) GROUP BY s.id_municipio
+            )
+            SELECT count(*) FROM a2 WHERE NOT viola
+            """
+        ).fetchone()[0]
+        mart4 = con.execute(
+            "SELECT count(*) FROM gold.ranking_atendimento_variacao"
+        ).fetchone()[0]
+    finally:
+        con.close()
+    assert sem_a2 == M10_PAINEL_SEM_A2
+    assert mart4 == M10_PAINEL_SEM_A2
+
+
+def test_m10_sql_sem_rascunho():
+    """O SQL do mart 10 não traz marcadores de rascunho (TODO/FIXME/XXX/rascunho)."""
+    import pathlib
+
+    sql = (
+        pathlib.Path(gold_mod.__file__).resolve().parent.parent
+        / "sql"
+        / "gold"
+        / "10_avanco_por_renda_painel.sql"
+    ).read_text(encoding="utf-8")
+    for marcador in ("TODO", "FIXME", "XXX", "rascunho", "placeholder"):
+        assert marcador.lower() not in sql.lower()

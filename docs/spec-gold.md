@@ -680,11 +680,14 @@ município, aplicada a todos os anos do mart):
 | `id_municipio` | VARCHAR | município | — |
 | `sigla_uf`, `nome_uf`, `nome_regiao` | VARCHAR | DTB | — |
 | `cobertura_urbana_agua` | DECIMAL | `populacao_urbana_atendida_agua/nullif(populacao_urbana,0) × 100` | % |
-| `cobertura_urbana_esgoto` | DECIMAL | `populacao_urbana_atendida_esgoto/nullif(populacao_urbana_residente_esgoto,0) × 100` | % |
-| `perdas_in049` | DECIMAL | IN049 do município (fórmula do mart 3) | % |
+| `cobertura_urbana_esgoto` | DECIMAL | `populacao_urbana_atendida_esgoto/nullif(populacao_urbana_residente_esgoto,0) × 100`; **NULL** para quem não informa esgoto (não zero) | % |
+| `informou_esgoto` | BOOLEAN | atendido **e** residente de esgoto urbanos informados (2.771 dos 5.302) | — |
+| `cobertura_urbana_agua_acima_100` | BOOLEAN | **D32** — sinaliza cobertura de água > 100% (valor preservado) | — |
+| `cobertura_urbana_esgoto_acima_100` | BOOLEAN | **D32** — sinaliza cobertura de esgoto > 100% (valor preservado) | — |
+| `perdas_in049` | DECIMAL | IN049 do município (`indice_perda_distribuicao_agua`) | % |
 | `investimento_per_capita` | DECIMAL | `investimento_total_prestador / nullif(populacao_total_ibge,0)` | R$/hab (nominal) |
 | `pib_per_capita` | DECIMAL | **`pib_municipio × 1000 / nullif(populacao_total_ibge,0)`** (D15: PIB em Mil Reais → **× 1000** converte para reais na gold) | R$/hab (nominal) |
-| `investimento_atipico` | BOOLEAN | flag D4/D28 (per capita > R$ 1.000/hab, nominal) | — |
+| `investimento_atipico` | BOOLEAN | flag D4/D28 (per capita > R$ 1.000/hab, nominal), **predicado exato do mart 5/8** | — |
 
 - **Regra D15 (conversão do PIB):** `pib_municipio` está em **Mil Reais** na
   silver (BIGINT). A conversão para reais acontece **só aqui**, com **comentário
@@ -692,16 +695,35 @@ município, aplicada a todos os anos do mart):
   (3550308) 2021 `pib_municipio` = 828.980.747 Mil Reais ≈ R$ 828,98 bi.
 - **Regra D17 (PIB per capita negativo):** se `pib_per_capita < 0`, ele
   **permanece no dado** e **não recebe transformação logarítmica** (log de ≤ 0 é
-  indefinido) — nenhum filtro, nenhum clamp. Caso conhecido: Guamaré/RN
-  (`2404507`) teve PIB negativo em 2012 (reavaliar em 2021 na carga).
-- **Regra D4/D28:** excluir os atípicos **apenas** de rankings per capita (coluna
-  `investimento_per_capita`), via a flag `investimento_atipico`; mart 9 mantém a
-  flag visível.
+  indefinido) — nenhum filtro, nenhum clamp. **Confirmado no MCP (2026-11-08):
+  0 negativos em 2021** (Guamaré/RN `2404507` voltou a positivo; negativo só em
+  2012). A regra fica registrada mesmo sem efeito prático em 2021.
+- **Regra D4/D28:** os atípicos de investimento **permanecem visíveis** (sem clamp,
+  sem exclusão, sem flag de PIB) — só a flag `investimento_atipico` herdada pelo
+  **predicado exato do mart 5/8** (`inv/pop > R$ 1.000/hab`). 2021 = **5 atípicos**
+  (= o valor do mart 5 em 2021). PIB per capita extremo (mineração/petróleo/
+  refinaria) **não** recebe tratamento: fica visível no município.
+- **Regra D32 (cobertura > 100%):** o valor **original** do município é preservado
+  (sem clamp) e **sinalizado** em coluna booleana. **2021: 18 água, 7 esgoto.**
+  Difere da D5 do mart 1 (que **exclui** do agregado) porque aqui o grão é o
+  município (não há soma de onde excluir). Ver `decisoes.md` D32.
+- **Esgoto "entre informantes" (pendência):** `cobertura_urbana_esgoto` cobre só
+  os **2.771 informantes** de esgoto urbano, não toda a população urbana — mesmo
+  **viés de seleção** do mart 1. Nacional 2021 (raw, entre informantes) =
+  **72,47%**; na convenção do mart 1 (exclui >100%) mart 9 e mart 1 **coincidem**
+  (72,437). **Pendência registrada; o mart 1 não é reaberto agora.**
+- **Fora do universo:** **268 municípios** têm pop+PIB mas **não informam água
+  urbana** em 2021 (**3.304.102 hab**, 1,55% da pop nacional), quase todos
+  pequenos (88 até 5k, 128 de 5–20k, 47 de 20–50k, 5 de 50–100k, 0 acima de 100k).
 - **Anos:** **2021** (único ano com urbano válido + PIB).
 - **Fontes:** SNIS; **IBGE-PIB**; **IBGE-POP**.
-- **Aceite:** nº de linhas = municípios com SNIS urbano + PIB + população casados
-  em 2021 = **5.302** (confirmado no MCP, água urbana). Correlação ≠ causalidade
-  (nota do dashboard).
+- **Aceite (confirmado no SELECT/MCP, 2026-11-08):** **5.302 linhas**, PK
+  `id_municipio` única, **13 colunas**. Σ pop IBGE 2021 (todos os 5.570) =
+  **213.317.639**; Σ PIB × 1000 / Σ pop = **R$ 42.247,52/hab** (= PIB per capita
+  Brasil 2021 do IBGE). Água urbana nacional (raw, Σ/Σ) = **93,45%** (= mart 1);
+  esgoto urbano entre informantes = **72,47%**; **0 PIB negativo**; `investimento_atipico`
+  2021 = **5** (= mart 5). **Associação, não causalidade** (nota do dashboard):
+  faixas de renda e Spearman ficam no **mart 10**, não aqui.
 
 ---
 
@@ -723,23 +745,56 @@ não entram (contados no diagnóstico do executor).
 
 **Colunas:**
 
+**Escopo (D33): ÁGUA-ONLY.** O esgoto **não entra** neste mart. É uma
+**limitação declarada**: um painel de esgoto exigiria informar esgoto nos 12
+anos — recorte com **viés de seleção** (não o Brasil) — e fica como **extensão
+futura, fora do escopo**. O mart mede só o atendimento **urbano de água**.
+
+**Colunas:**
+
 | Coluna | Tipo | Descrição | Unidade |
 |---|---|---|---|
 | `quartil_pib` | INTEGER | 1 (menor renda) a 4 (maior), `ntile(4)` nacional sobre pib_per_capita 2021 | — |
 | `ano` | INTEGER | 2010 ou 2021 | — |
 | `cobertura_urbana_agua` | DECIMAL | `Σpopulacao_urbana_atendida_agua/nullif(Σpopulacao_urbana,0) × 100` no quartil-ano | % |
-| `municipios_painel` | INTEGER | municípios do painel no quartil | contagem |
-| `variacao_pp` | DECIMAL | (coluna/linha derivada 2021 − 2010 por quartil) | pontos percentuais |
+| `municipios_painel` | INTEGER | municípios do painel no quartil (= 1.118) | contagem |
+| `variacao_pp` | DECIMAL | **medida principal**: `cobertura_2021 − cobertura_2010` por quartil (repetida nas duas linhas de ano) | pontos percentuais |
+| `reducao_relativa_deficit` | DECIMAL | **apoio**: `(déficit_2010 − déficit_2021) / déficit_2010 × 100`, com `déficit = 100 − cobertura` (repetida nas duas linhas de ano) | % |
 
 - **Denominador:** cobertura → urbano SNIS; quartil → **PIB per capita
   (IBGE-PIB × 1000 / IBGE-POP)**, base 2021.
+- **Painel (D19/D24):** o mart usa o **painel fixo único = 4.472** municípios,
+  **sem exclusão A2**. Sensibilidade registrada: painel menos as **41** violações
+  A2 (= **4.431**, igual ao mart 4) dá cobertura 2021 = **93,40%** contra
+  **93,52%** com os 4.472 — diferença imaterial.
+- **>100% (D5/D32):** o truncamento do mart 1 (D5) exclui a violação A2 do
+  **agregado**; aqui **não se aplica** — segue-se o princípio **D32** (preservar
+  o valor, sem clamp): a cobertura é soma/soma incluindo os >100% (excedente no
+  numerador). **Sem coluna de sinalização** porque o grão é agregado
+  (quartil, ano), não o município. Contagem descritiva: **26** municípios >100%
+  em 2010 e **16** em 2021 (dentro do painel).
 - **Regra D17:** PIB per capita negativo **cai naturalmente no 1º quartil**
-  (ordenação trata o negativo como menor valor); **sem log**, sem filtro.
-- **Anos:** **2010 e 2021**, painel fixo.
+  (ordenação trata o negativo como menor valor); **sem log**, sem filtro. Em base
+  **2021 há 0 negativos** (Guamaré/RN voltou a positivo); a regra fica registrada.
+- **Spearman municipal (renda × avanço):** **0,0075** (não ponderado) e
+  **−0,0809** (ponderado por população) → **sem relação monotônica no grão
+  município**. Número de apoio; **sem causa atribuída**.
+- **O que o painel NÃO representa:** apenas municípios que informaram **água
+  urbana nos 12 anos**. Ficam de fora **1.098** municípios (**17.858.047 hab**,
+  **8,4%** da população nacional de 2021): por porte (pop. 2021) — até 5 mil: 375
+  (1,17 mi); 5–20 mil: 469 (4,88 mi); 20–50 mil: 198 (5,98 mi); 50–100 mil: 44
+  (2,97 mi); 100–500 mil: 11 (1,63 mi); acima de 500 mil: **1** (1,22 mi).
+- **Anos:** **2010 e 2021**, painel fixo; **quartil fixo** (base 2021, um
+  município não muda de quartil entre os anos).
 - **Fontes:** SNIS; **IBGE-PIB**; **IBGE-POP**.
-- **Aceite:** **4 quartis × 2 anos = 8 linhas**. `Σmunicipios_painel` por ano =
-  **4.472** (painel fixo). Cada quartil ≈ 1.118 municípios (**chute a confirmar**
-  a distribuição exata, que depende de empates no `ntile`).
+- **Aceite (valores confirmados via MCP):** **4 quartis × 2 anos = 8 linhas**;
+  `Σmunicipios_painel` por ano = **4.472**; **1.118** municípios por quartil.
+  Cortes do PIB per capita (R$): Q1 5.731–13.140; Q2 13.144–23.850;
+  Q3 23.863–40.996; Q4 41.005–920.828. Cobertura (2010/2021): Q1 **80,03/82,63**;
+  Q2 **86,37/87,16**; Q3 **91,18/92,84**; Q4 **96,79/97,85**; painel
+  **92,17/93,52**. Avanço em pp: Q1 **+2,60**; Q2 **+0,79**; Q3 **+1,66**;
+  Q4 **+1,06** (Q2 é o pior — fato, sem causa). Redução relativa do déficit: Q1
+  **13,0%**; Q2 **5,8%**; Q3 **18,8%**; Q4 **33,0%**.
 
 ---
 
