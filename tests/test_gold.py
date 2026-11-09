@@ -1062,3 +1062,780 @@ def test_m5_investimento_atipico(gold_db):
     assert viola == 0
     queda = 100.0 * (1 - float(rn_sem) / float(rn_com))
     assert round(queda, 1) == M5_RN_QUEDA_PCT
+
+
+# ===========================================================================
+# Mart 6 — gold.atendimento_porte_ano (spec-gold.md §2, ficha Mart 6; D16/D29)
+# Expectativas confirmadas no SELECT/MCP (somente leitura, 2026-11-08).
+# ===========================================================================
+
+M6 = "gold.atendimento_porte_ano"
+
+M6_LINHAS = 72  # 6 faixas × 12 anos (2010–2021)
+M6_COLUNAS = 11
+M6_FAIXAS = 6
+M6_ANOS = 12
+# Faixa fixada pela pop. IBGE 2021 (D16); 5.570 nas faixas + 1 excluído = 5.571 (DTB).
+M6_MUNIC_POR_FAIXA = {
+    "1_ate_5mil": 1250,
+    "2_5a20mil": 2520,
+    "3_20a50mil": 1120,
+    "4_50a100mil": 354,
+    "5_100a500mil": 277,
+    "6_acima500mil": 49,
+}
+M6_MUNIC_FAIXAS = 5570  # soma das 6 faixas
+M6_DTB = 5571  # cadastro completo (D12)
+M6_POP_FAIXAS_2021 = 213_317_639  # Σ pop_total_ibge das faixas em 2021 (= IBGE Brasil)
+# Nacional 2021 por soma sobre soma (NÃO média das faixas), D29.
+M6_AGUA_NAC_2021 = 84.20  # IN055 oficial 84,2%
+M6_ESGOTO_NAC_2021 = 55.81  # IN056 oficial 55,8%
+M6_AUX_NAC_2021 = 66.95  # auxiliar (universo comum do esgoto)
+# Porte do mart 6 construído a partir da silver (fonte independente do mart).
+_PORTE = """
+WITH porte AS (
+  SELECT d.id_municipio,
+    CASE WHEN p.populacao_total_ibge IS NULL THEN NULL
+      WHEN p.populacao_total_ibge <   5000 THEN '1_ate_5mil'
+      WHEN p.populacao_total_ibge <  20000 THEN '2_5a20mil'
+      WHEN p.populacao_total_ibge <  50000 THEN '3_20a50mil'
+      WHEN p.populacao_total_ibge < 100000 THEN '4_50a100mil'
+      WHEN p.populacao_total_ibge < 500000 THEN '5_100a500mil'
+      ELSE '6_acima500mil' END AS faixa_porte
+  FROM silver.ibge_dtb_municipio d
+  LEFT JOIN silver.ibge_populacao_municipio p
+    ON p.id_municipio = d.id_municipio AND p.ano = 2021
+)
+"""
+
+
+def test_m6_linhas_pk_colunas(gold_db):
+    """72 linhas × 11 colunas; PK (faixa_porte, ano) única; 6 faixas × 12 anos."""
+    con = _ro(gold_db)
+    try:
+        linhas, faixas, anos = con.execute(
+            f"SELECT count(*), count(DISTINCT faixa_porte), count(DISTINCT ano) "
+            f"FROM {M6}"
+        ).fetchone()
+        colunas = con.execute(
+            "SELECT count(*) FROM duckdb_columns() WHERE schema_name = 'gold' "
+            "AND table_name = 'atendimento_porte_ano'"
+        ).fetchone()[0]
+        dup = con.execute(
+            f"SELECT count(*) FROM (SELECT 1 FROM {M6} "
+            "GROUP BY faixa_porte, ano HAVING count(*) > 1)"
+        ).fetchone()[0]
+    finally:
+        con.close()
+    assert (linhas, colunas) == (M6_LINHAS, M6_COLUNAS)
+    assert (faixas, anos) == (M6_FAIXAS, M6_ANOS)
+    assert dup == 0
+
+
+def test_m6_faixa_fixa_nos_12_anos(gold_db):
+    """D16: municipios_faixa é constante nos 12 anos e bate com os valores fixos."""
+    con = _ro(gold_db)
+    try:
+        # para cada faixa: um único valor de municipios_faixa em todos os anos
+        por_faixa = con.execute(
+            f"SELECT faixa_porte, count(DISTINCT municipios_faixa), min(municipios_faixa) "
+            f"FROM {M6} GROUP BY faixa_porte"
+        ).fetchall()
+    finally:
+        con.close()
+    distintos = {f: (n, v) for f, n, v in por_faixa}
+    for faixa, esperado in M6_MUNIC_POR_FAIXA.items():
+        n_valores, valor = distintos[faixa]
+        assert n_valores == 1, f"{faixa}: municipios_faixa varia entre anos"
+        assert valor == esperado, f"{faixa}: {valor} != {esperado}"
+
+
+def test_m6_universo_5570_mais_1(gold_db):
+    """5.570 nas faixas + 1 excluído (sem pop IBGE 2021) = 5.571 (DTB, D12)."""
+    con = _ro(gold_db)
+    try:
+        # soma das faixas no mart (em qualquer ano; é fixo)
+        soma_faixas = con.execute(
+            f"SELECT sum(municipios_faixa) FROM {M6} WHERE ano = 2021"
+        ).fetchone()[0]
+        # universo DTB e excluídos reconstruídos da silver (independente do mart)
+        dtb, sem_pop21 = con.execute(
+            _PORTE + "SELECT (SELECT count(*) FROM silver.ibge_dtb_municipio), "
+            "count(*) FILTER (WHERE faixa_porte IS NULL) FROM porte"
+        ).fetchone()
+    finally:
+        con.close()
+    assert soma_faixas == M6_MUNIC_FAIXAS
+    assert dtb == M6_DTB
+    assert sem_pop21 == M6_DTB - M6_MUNIC_FAIXAS  # exatamente 1 excluído
+    assert soma_faixas + sem_pop21 == dtb
+
+
+def test_m6_pop_total_ibge_2021(gold_db):
+    """Σ pop_total_ibge das faixas em 2021 = 213.317.639 (= estimativa IBGE Brasil)."""
+    con = _ro(gold_db)
+    try:
+        total = con.execute(
+            f"SELECT sum(pop_total_ibge) FROM {M6} WHERE ano = 2021"
+        ).fetchone()[0]
+    finally:
+        con.close()
+    assert total == M6_POP_FAIXAS_2021
+
+
+def test_m6_identidade_informantes_faixa(gold_db):
+    """Identidade: informantes + não-informantes = municipios_faixa (água e esgoto).
+
+    Como municipios_faixa é o universo fixo da faixa, informantes nunca o excedem
+    e o complemento é o nº de não-informantes. Vale em todos os 72 grãos.
+    """
+    con = _ro(gold_db)
+    try:
+        viola = con.execute(
+            f"SELECT count(*) FROM {M6} WHERE "
+            "municipios_informantes_agua > municipios_faixa "
+            "OR municipios_informantes_esgoto > municipios_faixa "
+            "OR municipios_informantes_agua < 0 "
+            "OR municipios_informantes_esgoto < 0"
+        ).fetchone()[0]
+    finally:
+        con.close()
+    assert viola == 0
+
+
+def test_m6_nacional_2021_soma_sobre_soma(gold_db):
+    """Água 84,20% / esgoto 55,81% / auxiliar 66,95% nacionais 2021.
+
+    Reconstruídos da silver por SOMA SOBRE SOMA (não média das faixas do mart),
+    com a mesma faixa/universo. Água e esgoto dividem pela pop. dos informantes
+    de ÁGUA (D29); o auxiliar divide pela pop. dos informantes de esgoto.
+    """
+    con = _ro(gold_db)
+    try:
+        agua, esgoto, aux = con.execute(
+            _PORTE
+            + """
+            , base AS (
+              SELECT pt.faixa_porte, pop.populacao_total_ibge AS pop_ibge,
+                s.populacao_atendida_agua AS at_agua,
+                s.populacao_atendida_esgoto AS at_esg
+              FROM porte pt
+              LEFT JOIN silver.ibge_populacao_municipio pop
+                ON pop.id_municipio = pt.id_municipio AND pop.ano = 2021
+              LEFT JOIN silver.municipio_agua_esgoto s
+                ON s.id_municipio = pt.id_municipio AND s.ano = 2021
+              WHERE pt.faixa_porte IS NOT NULL
+            )
+            SELECT
+              100.0 * sum(at_agua) / nullif(sum(pop_ibge) FILTER (WHERE at_agua IS NOT NULL), 0),
+              100.0 * sum(at_esg)  / nullif(sum(pop_ibge) FILTER (WHERE at_agua IS NOT NULL), 0),
+              100.0 * sum(at_esg)  / nullif(sum(pop_ibge) FILTER (WHERE at_esg  IS NOT NULL), 0)
+            FROM base
+            """
+        ).fetchone()
+    finally:
+        con.close()
+    assert round(float(agua), 2) == M6_AGUA_NAC_2021
+    assert round(float(esgoto), 2) == M6_ESGOTO_NAC_2021
+    assert round(float(aux), 2) == M6_AUX_NAC_2021
+
+
+def test_m6_esgoto_usa_denominador_agua(gold_db):
+    """D29: o denominador do esgoto é pop_informante_agua, NÃO pop_informante_esgoto.
+
+    Reconstrói o numerador (Σ atendido esgoto) da silver e confere, grão a grão,
+    que cobertura_esgoto = 100 × num / pop_informante_agua. Este teste FALHA se
+    alguém trocar o denominador por pop_informante_esgoto (o auxiliar), porque os
+    dois denominadores diferem na maioria dos grãos.
+    """
+    con = _ro(gold_db)
+    try:
+        # confirma que há grãos onde os dois denominadores diferem (teste não é vazio)
+        diferem = con.execute(
+            f"SELECT count(*) FROM {M6} WHERE pop_informante_agua <> pop_informante_esgoto"
+        ).fetchone()[0]
+        # numerador do esgoto reconstruído da silver, por (faixa, ano)
+        divergentes = con.execute(
+            _PORTE
+            + f"""
+            , num AS (
+              SELECT pt.faixa_porte, s.ano, sum(s.populacao_atendida_esgoto) AS n_esg
+              FROM porte pt
+              JOIN silver.municipio_agua_esgoto s ON s.id_municipio = pt.id_municipio
+              WHERE pt.faixa_porte IS NOT NULL AND s.ano BETWEEN 2010 AND 2021
+              GROUP BY pt.faixa_porte, s.ano
+            )
+            SELECT count(*) FROM {M6} m JOIN num n
+              ON n.faixa_porte = m.faixa_porte AND n.ano = m.ano
+            WHERE abs(m.cobertura_esgoto
+                      - 100.0 * n.n_esg / nullif(m.pop_informante_agua, 0)) > 1e-6
+            """
+        ).fetchone()[0]
+        # e que usar o denominador de esgoto daria resultado DIFERENTE (prova do swap)
+        trocado_bateria = con.execute(
+            _PORTE
+            + f"""
+            , num AS (
+              SELECT pt.faixa_porte, s.ano, sum(s.populacao_atendida_esgoto) AS n_esg
+              FROM porte pt
+              JOIN silver.municipio_agua_esgoto s ON s.id_municipio = pt.id_municipio
+              WHERE pt.faixa_porte IS NOT NULL AND s.ano BETWEEN 2010 AND 2021
+              GROUP BY pt.faixa_porte, s.ano
+            )
+            SELECT count(*) FROM {M6} m JOIN num n
+              ON n.faixa_porte = m.faixa_porte AND n.ano = m.ano
+            WHERE m.pop_informante_agua <> m.pop_informante_esgoto
+              AND abs(m.cobertura_esgoto
+                      - 100.0 * n.n_esg / nullif(m.pop_informante_esgoto, 0)) <= 1e-6
+            """
+        ).fetchone()[0]
+    finally:
+        con.close()
+    assert diferem > 0  # existem grãos com denominadores distintos
+    assert divergentes == 0  # cobertura_esgoto usa pop_informante_agua
+    assert trocado_bateria == 0  # e NÃO coincide com o denominador de esgoto
+
+
+def test_m6_cobertura_esgoto_auxiliar_relacao(gold_db):
+    """D29: cobertura_esgoto (denom. água) ≤ auxiliar (denom. esgoto) — mesmo numerador.
+
+    O auxiliar usa um denominador menor (só informantes de esgoto), então nunca é
+    menor que cobertura_esgoto. Confirma também que os numeradores coincidem:
+    cobertura_esgoto × pop_informante_agua = auxiliar × pop_informante_esgoto.
+    """
+    con = _ro(gold_db)
+    try:
+        viola_ordem = con.execute(
+            f"SELECT count(*) FROM {M6} "
+            "WHERE cobertura_esgoto > cobertura_esgoto_entre_informantes + 1e-9"
+        ).fetchone()[0]
+        num_incoerente = con.execute(
+            f"SELECT count(*) FROM {M6} WHERE abs("
+            "cobertura_esgoto * pop_informante_agua "
+            "- cobertura_esgoto_entre_informantes * pop_informante_esgoto) > 1e-3"
+        ).fetchone()[0]
+    finally:
+        con.close()
+    assert viola_ordem == 0
+    assert num_incoerente == 0
+
+
+def test_m6_monotonicidade_2021(gold_db):
+    """Perfil por faixa em 2021 (D29):
+
+    - esgoto (IN056): monótono crescente nas 6 faixas;
+    - água (IN055): crescente a partir da faixa 2 (faixa 1 > faixa 2, fato sem causa);
+    - auxiliar: sem assumir monotonicidade (só verificamos que está em [0, 100]);
+    - água > esgoto em todas as faixas.
+    """
+    con = _ro(gold_db)
+    try:
+        linhas = con.execute(
+            f"SELECT faixa_porte, cobertura_agua, cobertura_esgoto, "
+            f"cobertura_esgoto_entre_informantes "
+            f"FROM {M6} WHERE ano = 2021 ORDER BY faixa_porte"
+        ).fetchall()
+    finally:
+        con.close()
+    # ordem das faixas é o prefixo numérico (1_..6_), já crescente por porte
+    agua = [r[1] for r in linhas]
+    esgoto = [r[2] for r in linhas]
+    aux = [r[3] for r in linhas]
+    # esgoto IN056 monótono crescente nas 6 faixas
+    assert all(esgoto[i] < esgoto[i + 1] for i in range(len(esgoto) - 1))
+    # água crescente a partir da faixa 2 (índices 1..5)
+    assert all(agua[i] < agua[i + 1] for i in range(1, len(agua) - 1))
+    # faixa 1 > faixa 2 (fato documentado, sem causa)
+    assert agua[0] > agua[1]
+    # água > esgoto em todas as faixas
+    assert all(a > e for a, e in zip(agua, esgoto))
+    # auxiliar só precisa estar em [0, 100] (não assumimos monotonicidade)
+    assert all(0 <= x <= 100 for x in aux)
+
+
+# ===========================================================================
+# Mart 7 — gold.populacao_sem_servico_uf_ano (spec-gold.md §2, ficha Mart 7; D30/D29)
+# Expectativas confirmadas no SELECT/MCP (somente leitura, 2026-11-08).
+# ===========================================================================
+
+M7 = "gold.populacao_sem_servico_uf_ano"
+
+M7_LINHAS = 324  # 27 UF × 12 anos (2010–2021)
+M7_COLUNAS = 14
+M7_UFS = 27
+M7_ANOS = 12
+M7_SEM_AGUA_2021 = 33_285_121  # Σ pop_sem_agua nacional 2021 (greatest por município)
+M7_SEM_ESGOTO_2021 = 92_879_110  # Σ pop_sem_esgoto nacional 2021 (IN056/D30)
+M7_PCT_AGUA_2021 = 15.8  # 100 − IN055 (84,2)
+M7_PCT_ESGOTO_2021 = 44.19  # 100 − IN056 (55,81)
+M7_POP_BR_2021 = 213_317_639  # Σ pop_total_ibge 2021 = estimativa IBGE Brasil
+# Topo do pct_sem_esgoto 2021: Norte (D29/D30).
+M7_TOPO_ESGOTO_2021 = ["RO", "AP", "PA"]
+
+
+def test_m7_linhas_pk_colunas(gold_db):
+    """324 linhas × 14 colunas; PK (ano, sigla_uf) única; dims DTB não nulas."""
+    con = _ro(gold_db)
+    try:
+        linhas, ufs, anos = con.execute(
+            f"SELECT count(*), count(DISTINCT sigla_uf), count(DISTINCT ano) FROM {M7}"
+        ).fetchone()
+        colunas = con.execute(
+            "SELECT count(*) FROM duckdb_columns() WHERE schema_name = 'gold' "
+            "AND table_name = 'populacao_sem_servico_uf_ano'"
+        ).fetchone()[0]
+        dup = con.execute(
+            f"SELECT count(*) FROM (SELECT 1 FROM {M7} "
+            "GROUP BY ano, sigla_uf HAVING count(*) > 1)"
+        ).fetchone()[0]
+        nulos = con.execute(
+            f"SELECT count(*) FROM {M7} "
+            "WHERE sigla_uf IS NULL OR nome_uf IS NULL OR nome_regiao IS NULL"
+        ).fetchone()[0]
+    finally:
+        con.close()
+    assert (linhas, colunas) == (M7_LINHAS, M7_COLUNAS)
+    assert (ufs, anos) == (M7_UFS, M7_ANOS)
+    assert dup == 0 and nulos == 0
+
+
+def test_m7_identidade_informantes_sem_informacao(gold_db):
+    """Identidade: informantes_agua + sem_informacao_agua = municípios da UF no ano.
+
+    O total de municípios por (ano, UF) é reconstruído da silver (universo =
+    populacao × DTB na janela), independente do mart. Vale nos 324 grãos.
+    """
+    con = _ro(gold_db)
+    try:
+        divergentes = con.execute(
+            f"""
+            WITH esperado AS (
+              SELECT p.ano, d.sigla_uf, count(*) AS munic
+              FROM silver.ibge_populacao_municipio p
+              JOIN silver.ibge_dtb_municipio d ON d.id_municipio = p.id_municipio
+              WHERE p.ano BETWEEN 2010 AND 2021
+              GROUP BY p.ano, d.sigla_uf
+            )
+            SELECT count(*) FROM {M7} m JOIN esperado e
+              ON e.ano = m.ano AND e.sigla_uf = m.sigla_uf
+            WHERE m.municipios_informantes_agua + m.municipios_sem_informacao_agua
+                  <> e.munic
+            """
+        ).fetchone()[0]
+    finally:
+        con.close()
+    assert divergentes == 0
+
+
+def test_m7_pop_por_ano_igual_ibge(gold_db):
+    """Σ pop_total_ibge por ano = estimativa IBGE Brasil (soma sobre as UFs)."""
+    con = _ro(gold_db)
+    try:
+        divergentes = con.execute(
+            f"""
+            WITH ibge AS (
+              SELECT ano, sum(populacao_total_ibge) AS pop
+              FROM silver.ibge_populacao_municipio
+              WHERE ano BETWEEN 2010 AND 2021 GROUP BY ano
+            ),
+            mart AS (SELECT ano, sum(pop_total_ibge) AS pop FROM {M7} GROUP BY ano)
+            SELECT count(*) FROM mart m JOIN ibge i ON i.ano = m.ano
+            WHERE m.pop <> i.pop
+            """
+        ).fetchone()[0]
+        pop_2021 = con.execute(
+            f"SELECT sum(pop_total_ibge) FROM {M7} WHERE ano = 2021"
+        ).fetchone()[0]
+    finally:
+        con.close()
+    assert divergentes == 0
+    assert pop_2021 == M7_POP_BR_2021
+
+
+def test_m7_nacional_2021(gold_db):
+    """Nacional 2021: sem água 33,29 mi (15,8%); sem esgoto 92,88 mi (44,19%)."""
+    con = _ro(gold_db)
+    try:
+        sem_agua, sem_esg, pop_inf = con.execute(
+            f"SELECT sum(pop_sem_agua), sum(pop_sem_esgoto), sum(pop_informante_agua) "
+            f"FROM {M7} WHERE ano = 2021"
+        ).fetchone()
+    finally:
+        con.close()
+    assert sem_agua == M7_SEM_AGUA_2021
+    assert sem_esg == M7_SEM_ESGOTO_2021
+    assert round(100.0 * float(sem_agua) / float(pop_inf), 1) == M7_PCT_AGUA_2021
+    assert round(100.0 * float(sem_esg) / float(pop_inf), 2) == M7_PCT_ESGOTO_2021
+
+
+def test_m7_sem_negativos(gold_db):
+    """greatest(…,0) por município: pop_sem_* nunca negativo; piso ≥ 0."""
+    con = _ro(gold_db)
+    try:
+        negativos = con.execute(
+            f"SELECT count(*) FROM {M7} WHERE pop_sem_agua < 0 OR pop_sem_esgoto < 0 "
+            "OR pop_sem_informacao_agua < 0"
+        ).fetchone()[0]
+    finally:
+        con.close()
+    assert negativos == 0
+
+
+def test_m7_esgoto_usa_informantes_agua(gold_db):
+    """D30: pop_sem_esgoto usa os informantes de ÁGUA, NÃO os de esgoto.
+
+    Reconstrói as duas convenções da silver, por (ano, UF): a do mart tem de
+    bater com a dos informantes de ÁGUA e NÃO com a dos informantes de esgoto
+    (a convenção antiga, revogada). Este teste FALHA se alguém trocar a base,
+    como no mart 6.
+    """
+    con = _ro(gold_db)
+    try:
+        bate_agua, bate_esgoto, difere = con.execute(
+            f"""
+            WITH recon AS (
+              SELECT p.ano, d.sigla_uf,
+                sum(greatest(p.populacao_total_ibge
+                    - coalesce(s.populacao_atendida_esgoto, 0), 0))
+                  FILTER (WHERE s.populacao_atendida_agua IS NOT NULL) AS sem_esg_agua,
+                sum(greatest(p.populacao_total_ibge
+                    - coalesce(s.populacao_atendida_esgoto, 0), 0))
+                  FILTER (WHERE s.populacao_atendida_esgoto IS NOT NULL) AS sem_esg_esg
+              FROM silver.ibge_populacao_municipio p
+              JOIN silver.ibge_dtb_municipio d ON d.id_municipio = p.id_municipio
+              LEFT JOIN silver.municipio_agua_esgoto s
+                ON s.id_municipio = p.id_municipio AND s.ano = p.ano
+              WHERE p.ano BETWEEN 2010 AND 2021
+              GROUP BY p.ano, d.sigla_uf
+            )
+            SELECT
+              count(*) FILTER (WHERE m.pop_sem_esgoto = r.sem_esg_agua),
+              count(*) FILTER (WHERE m.pop_sem_esgoto = r.sem_esg_esg),
+              count(*) FILTER (WHERE r.sem_esg_agua <> r.sem_esg_esg)
+            FROM {M7} m JOIN recon r ON r.ano = m.ano AND r.sigla_uf = m.sigla_uf
+            """
+        ).fetchone()
+    finally:
+        con.close()
+    assert bate_agua == M7_LINHAS  # todos os grãos usam informantes de água
+    assert difere > 0  # as duas convenções diferem na maioria dos grãos
+    assert bate_esgoto < M7_LINHAS  # NÃO é a convenção de informantes de esgoto
+
+
+def test_m7_topo_esgoto_2021_norte(gold_db):
+    """Ranking 2021: RO, AP, PA no topo do pct_sem_esgoto (Norte, D29/D30)."""
+    con = _ro(gold_db)
+    try:
+        topo = [
+            r[0]
+            for r in con.execute(
+                f"SELECT sigla_uf FROM {M7} WHERE ano = 2021 "
+                "ORDER BY pct_sem_esgoto DESC LIMIT 3"
+            ).fetchall()
+        ]
+    finally:
+        con.close()
+    assert topo == M7_TOPO_ESGOTO_2021
+
+
+def test_m7_sql_sem_rascunho():
+    """O SQL do mart 7 não traz marcadores de rascunho (TODO/FIXME/XXX/rascunho)."""
+    import pathlib
+
+    sql = (
+        pathlib.Path(gold_mod.__file__).resolve().parent.parent
+        / "sql"
+        / "gold"
+        / "07_populacao_sem_servico_uf_ano.sql"
+    ).read_text(encoding="utf-8")
+    for marcador in ("TODO", "FIXME", "XXX", "rascunho", "placeholder"):
+        assert marcador.lower() not in sql.lower()
+
+
+# ===========================================================================
+# Mart 8 — gold.investimento_per_capita_uf_ano (spec-gold.md §2, ficha Mart 8)
+# D31 (denominador universo comum) + D4/D28 (atípico, regra do mart 5 verbatim).
+# Expectativas confirmadas no SELECT/MCP (somente leitura, 2026-11-08).
+# ===========================================================================
+
+M8 = "gold.investimento_per_capita_uf_ano"
+
+M8_LINHAS = 324  # 27 UF × 12 anos (2010–2021)
+M8_COLUNAS = 12
+M8_UFS = 27
+M8_ANOS = 12
+# Universo de municípios (DTB ∩ pop IBGE) por ano: 5.570, salvo 2010/2011 (5.565).
+M8_UNIVERSO = {
+    ano: (5565 if ano in (2010, 2011) else 5570) for ano in range(2010, 2022)
+}
+# Atípicos por ano (D4/D28, R$ 1.000/hab) — idênticos ao mart 5.
+M8_ATIPICOS_POR_ANO = {
+    2010: 6,
+    2011: 2,
+    2012: 10,
+    2013: 5,
+    2014: 11,
+    2015: 5,
+    2016: 4,
+    2017: 11,
+    2018: 10,
+    2019: 48,
+    2020: 3,
+    2021: 5,
+}
+M8_ATIPICOS_TOTAL = 120
+# Per capita nacional (soma sobre soma), R$/hab.
+M8_PC_COM = {2010: 44.26, 2019: 72.17, 2021: 75.82}
+M8_PC_SEM = {2010: 42.88, 2019: 61.36, 2021: 75.56}
+# RN 2019: com → sem atípicos (coluna do mart, por UF).
+M8_RN_2019_COM, M8_RN_2019_SEM = 443.38, 218.91
+# Denominador D31 (universo comum, 2021): pop informante < pop de todos os 5.570.
+M8_POP_INFORMANTE_2021 = 201_771_427
+M8_POP_TODOS_2021 = 213_317_639
+
+
+def test_m8_linhas_pk_colunas(gold_db):
+    """324 linhas; 12 colunas; PK (ano, sigla_uf) única; dims DTB não nulas."""
+    con = _ro(gold_db)
+    try:
+        linhas, ufs, anos, colunas = con.execute(
+            f"SELECT count(*), count(DISTINCT sigla_uf), count(DISTINCT ano), "
+            "(SELECT count(*) FROM duckdb_columns() WHERE schema_name='gold' "
+            "AND table_name='investimento_per_capita_uf_ano') "
+            f"FROM {M8}"
+        ).fetchone()
+        dups = con.execute(
+            f"SELECT count(*) FROM (SELECT ano, sigla_uf FROM {M8} "
+            "GROUP BY ano, sigla_uf HAVING count(*) > 1)"
+        ).fetchone()[0]
+        nulos = con.execute(
+            f"SELECT count(*) FROM {M8} WHERE ano IS NULL OR sigla_uf IS NULL "
+            "OR nome_uf IS NULL OR nome_regiao IS NULL OR valor_nominal IS NOT TRUE"
+        ).fetchone()[0]
+        fora_janela = con.execute(
+            f"SELECT count(*) FROM {M8} WHERE ano NOT BETWEEN 2010 AND 2021"
+        ).fetchone()[0]
+    finally:
+        con.close()
+    assert (linhas, ufs, anos, colunas) == (M8_LINHAS, M8_UFS, M8_ANOS, M8_COLUNAS)
+    assert dups == 0
+    assert nulos == 0
+    assert fora_janela == 0
+
+
+def test_m8_universo_e_identidade(gold_db):
+    """Identidade informantes + não-informantes = municípios da UF-ano (DTB∩pop).
+
+    O universo (5.570/ano; 5.565 em 2010/2011) é reconstruído da silver; o mart
+    conta `municipios_informantes` e o resto são os não-informantes.
+    """
+    con = _ro(gold_db)
+    try:
+        # municípios da UF-ano = DTB ∩ pop IBGE (fonte independente do mart)
+        universo = con.execute(
+            """
+            SELECT p.ano, d.sigla_uf, count(*)
+            FROM silver.ibge_dtb_municipio d
+            JOIN silver.ibge_populacao_municipio p ON p.id_municipio = d.id_municipio
+            WHERE p.ano BETWEEN 2010 AND 2021
+            GROUP BY p.ano, d.sigla_uf
+            """
+        ).fetchall()
+        # informantes de investimento por UF-ano, direto da silver
+        inform = con.execute(
+            """
+            SELECT s.ano, d.sigla_uf, count(*)
+            FROM silver.municipio_agua_esgoto s
+            JOIN silver.ibge_dtb_municipio d ON d.id_municipio = s.id_municipio
+            JOIN silver.ibge_populacao_municipio p
+              ON p.id_municipio = s.id_municipio AND p.ano = s.ano
+            WHERE s.ano BETWEEN 2010 AND 2021
+              AND s.investimento_total_prestador IS NOT NULL AND p.populacao_total_ibge > 0
+            GROUP BY s.ano, d.sigla_uf
+            """
+        ).fetchall()
+        mart = con.execute(
+            f"SELECT ano, sigla_uf, municipios_informantes FROM {M8}"
+        ).fetchall()
+        # total nacional por ano (confere 5.570/5.565)
+        nacional = con.execute(
+            """
+            SELECT p.ano, count(*)
+            FROM silver.ibge_dtb_municipio d
+            JOIN silver.ibge_populacao_municipio p ON p.id_municipio = d.id_municipio
+            WHERE p.ano BETWEEN 2010 AND 2021
+            GROUP BY p.ano
+            """
+        ).fetchall()
+    finally:
+        con.close()
+    universo = {(a, u): n for a, u, n in universo}
+    inform = {(a, u): n for a, u, n in inform}
+    mart = {(a, u): n for a, u, n in mart}
+    # o mart conta exatamente os informantes da silver
+    assert mart == inform
+    # identidade: informantes + não-informantes = universo da UF-ano
+    for chave, total in universo.items():
+        inf = mart.get(chave, 0)
+        nao_inf = total - inf
+        assert inf + nao_inf == total
+        assert nao_inf >= 0
+    assert {a: n for a, n in nacional} == M8_UNIVERSO
+
+
+def test_m8_serie_atipicos(gold_db):
+    """Série de atípicos por ano = 6,2,10,5,11,5,4,11,10,48,3,5 (total 120)."""
+    con = _ro(gold_db)
+    try:
+        por_ano = con.execute(
+            f"SELECT ano, sum(municipios_investimento_atipico) FROM {M8} "
+            "GROUP BY ano ORDER BY ano"
+        ).fetchall()
+    finally:
+        con.close()
+    obtido = {ano: int(n) for ano, n in por_ano}
+    assert obtido == M8_ATIPICOS_POR_ANO
+    assert sum(obtido.values()) == M8_ATIPICOS_TOTAL
+
+
+def test_m8_per_capita_nacional(gold_db):
+    """Per capita nacional com/sem atípicos (soma sobre soma), R$/hab.
+
+    `com` vem das colunas do próprio mart (investimento_total / pop_informante);
+    `sem` é reconstruído da silver (não há coluna de pop sem atípicos no mart),
+    com o predicado de atípico replicado verbatim do mart 5 (D4/D28).
+    """
+    con = _ro(gold_db)
+    try:
+        # com atípicos, a partir das colunas do mart
+        com = con.execute(
+            f"SELECT ano, sum(investimento_total) / nullif(sum(pop_informante_investimento), 0) "
+            f"FROM {M8} GROUP BY ano"
+        ).fetchall()
+        # sem atípicos, reconstruído da silver (fonte independente)
+        sem = con.execute(
+            """
+            WITH m AS (
+              SELECT s.ano, s.investimento_total_prestador AS inv, p.populacao_total_ibge AS pop
+              FROM silver.municipio_agua_esgoto s
+              JOIN silver.ibge_populacao_municipio p
+                ON p.id_municipio = s.id_municipio AND p.ano = s.ano
+              WHERE s.ano BETWEEN 2010 AND 2021
+                AND s.investimento_total_prestador IS NOT NULL AND p.populacao_total_ibge > 0
+            )
+            SELECT ano, sum(inv) FILTER (WHERE NOT (inv / pop > 1000.0))
+              / nullif(sum(pop) FILTER (WHERE NOT (inv / pop > 1000.0)), 0)
+            FROM m GROUP BY ano
+            """
+        ).fetchall()
+    finally:
+        con.close()
+    com = {ano: round(float(v), 2) for ano, v in com}
+    sem = {ano: round(float(v), 2) for ano, v in sem}
+    for ano, esperado in M8_PC_COM.items():
+        assert com[ano] == esperado
+    for ano, esperado in M8_PC_SEM.items():
+        assert sem[ano] == esperado
+
+
+def test_m8_rn_2019(gold_db):
+    """RN 2019: 443,38 (com) → 218,91 (sem) R$/hab; o atípico derruba o outlier."""
+    con = _ro(gold_db)
+    try:
+        com, sem, atip = con.execute(
+            "SELECT investimento_per_capita_com_atipicos, "
+            "investimento_per_capita_sem_atipicos, municipios_investimento_atipico "
+            f"FROM {M8} WHERE ano = 2019 AND sigla_uf = 'RN'"
+        ).fetchone()
+    finally:
+        con.close()
+    assert round(float(com), 2) == M8_RN_2019_COM
+    assert round(float(sem), 2) == M8_RN_2019_SEM
+    assert float(sem) < float(com)
+    assert int(atip) == 45
+
+
+def test_m8_cross_mart5(gold_db):
+    """Consistência interna (mesma silver): mart 8 = mart 5 por (ano, sigla_uf).
+
+    Trava a regra do atípico (D4/D28) contra deriva — não é validação externa.
+    Σinv, investimento_total_sem_atipicos e municipios_investimento_atipico
+    devem bater exatamente com o mart 5 na janela 2010–2021.
+    """
+    con = _ro(gold_db)
+    try:
+        divergentes = con.execute(
+            f"""
+            SELECT count(*)
+            FROM {M8} a
+            JOIN {M5} f USING (ano, sigla_uf)
+            WHERE f.ano BETWEEN 2010 AND 2021
+              AND (a.investimento_total IS DISTINCT FROM f.investimento_total
+                OR a.investimento_total_sem_atipicos
+                     IS DISTINCT FROM f.investimento_total_sem_atipicos
+                OR a.municipios_investimento_atipico
+                     <> f.municipios_investimento_atipico)
+            """
+        ).fetchone()[0]
+        pares = con.execute(
+            f"SELECT count(*) FROM {M8} a JOIN {M5} f USING (ano, sigla_uf) "
+            "WHERE f.ano BETWEEN 2010 AND 2021"
+        ).fetchone()[0]
+    finally:
+        con.close()
+    assert divergentes == 0
+    assert pares == M8_LINHAS
+
+
+def test_m8_denominador_universo_comum(gold_db):
+    """D31: o denominador é a pop dos INFORMANTES, não a de todos os municípios.
+
+    Falha se o denominador passar a incluir os não-informantes (a pop informante
+    se aproximaria dos 5.570 e o per capita 2021 cairia de 75,82 para 71,71).
+    """
+    con = _ro(gold_db)
+    try:
+        pop_inf_2021 = con.execute(
+            f"SELECT sum(pop_informante_investimento) FROM {M8} WHERE ano = 2021"
+        ).fetchone()[0]
+        # pop de TODOS os municípios (DTB ∩ pop) em 2021 — fonte independente
+        pop_todos_2021 = con.execute(
+            """
+            SELECT sum(p.populacao_total_ibge)
+            FROM silver.ibge_dtb_municipio d
+            JOIN silver.ibge_populacao_municipio p ON p.id_municipio = d.id_municipio
+            WHERE p.ano = 2021
+            """
+        ).fetchone()[0]
+        # o per capita do mart usa a pop informante (universo comum)
+        pc_2021 = con.execute(
+            f"SELECT sum(investimento_total) / nullif(sum(pop_informante_investimento), 0) "
+            f"FROM {M8} WHERE ano = 2021"
+        ).fetchone()[0]
+        # o que daria se o denominador fosse a pop de TODOS (contrafactual)
+        inv_2021 = con.execute(
+            f"SELECT sum(investimento_total) FROM {M8} WHERE ano = 2021"
+        ).fetchone()[0]
+    finally:
+        con.close()
+    assert int(pop_inf_2021) == M8_POP_INFORMANTE_2021
+    assert int(pop_todos_2021) == M8_POP_TODOS_2021
+    # o denominador do mart é estritamente menor que a pop total
+    assert pop_inf_2021 < pop_todos_2021
+    # per capita com universo comum = 75,82 (não 71,71 de todos)
+    assert round(float(pc_2021), 2) == 75.82
+    assert round(float(inv_2021) / float(pop_todos_2021), 2) == 71.71
+
+
+def test_m8_sql_sem_rascunho():
+    """O SQL do mart 8 não traz marcadores de rascunho (TODO/FIXME/XXX/rascunho)."""
+    import pathlib
+
+    sql = (
+        pathlib.Path(gold_mod.__file__).resolve().parent.parent
+        / "sql"
+        / "gold"
+        / "08_investimento_per_capita_uf_ano.sql"
+    ).read_text(encoding="utf-8")
+    for marcador in ("TODO", "FIXME", "XXX", "rascunho", "placeholder"):
+        assert marcador.lower() not in sql.lower()

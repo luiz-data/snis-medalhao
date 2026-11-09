@@ -499,23 +499,48 @@ município, aplicada a todos os anos do mart):
 |---|---|---|---|
 | `ano` | INTEGER | 2010–2021 (janela IBGE) | — |
 | `faixa_porte` | VARCHAR | uma das 6 faixas (porte fixado em 2021, D16) | — |
-| `cobertura_agua` | DECIMAL | `Σpopulacao_atendida_agua / nullif(Σpopulacao_total_ibge,0) × 100` | % |
-| `cobertura_esgoto` | DECIMAL | `Σpopulacao_atendida_esgoto / nullif(Σpopulacao_total_ibge,0) × 100` | % |
+| `pop_total_ibge` | BIGINT | Σ`populacao_total_ibge` da faixa inteira no ano | habitantes |
+| `municipios_faixa` | INTEGER | nº de municípios da faixa (fixo: 1.250/2.520/1.120/354/277/49) | contagem |
+| `pop_informante_agua` | BIGINT | Σ`populacao_total_ibge` **dos informantes de água** (denominador da água e do esgoto, D29) | habitantes |
+| `pop_informante_esgoto` | BIGINT | Σ`populacao_total_ibge` dos informantes de esgoto (denominador só do auxiliar) | habitantes |
+| `cobertura_agua` | DECIMAL | **IN055** — `Σpopulacao_atendida_agua / nullif(Σpop_total_ibge FILTER (informa água),0) × 100` | % |
+| `cobertura_esgoto` | DECIMAL | **IN056** — `Σpopulacao_atendida_esgoto / nullif(Σpop_total_ibge FILTER (informa **ÁGUA**),0) × 100` (denominador = `pop_informante_agua`, **não** `pop_informante_esgoto`; D29) | % |
+| `cobertura_esgoto_entre_informantes` | DECIMAL | **auxiliar** — `Σpopulacao_atendida_esgoto / nullif(Σpop_total_ibge FILTER (informa esgoto),0) × 100`; descreve **só quem informa** esgoto, **não comparar faixas por ela** (D29) | % |
 | `municipios_informantes_agua` | INTEGER | municípios com atendido água e pop. IBGE não nulos | contagem |
 | `municipios_informantes_esgoto` | INTEGER | idem esgoto | contagem |
 
-- **Denominador:** **população total IBGE-POP**; a **faixa** também é da
-  população IBGE 2021 do município.
-- **Anos:** 2010–2021.
+- **Denominador (D29):** **água e esgoto** dividem pela **população IBGE dos
+  informantes de água** (universo comum na água; convenção oficial **IN056** no
+  esgoto — o denominador é `pop_informante_agua`). O universo comum vale para a
+  água e os demais indicadores; foi **afastado para o esgoto por viés de seleção**
+  (branco de esgoto = "sem sistema": 2.531 de 2.532 brancos de 2021 têm colunas
+  físicas de esgoto nulas/zero). A **faixa** é da população IBGE 2021 do município.
+- **Anos:** 2010–2021. Universo = cadastro `silver.ibge_dtb_municipio` (5.571);
+  **1 excluído** sem pop. IBGE 2021 (5101837 Boa Esperança do Norte/MT, D12) →
+  **5.570 nas faixas + 1 = 5.571**.
 - **Fontes:** SNIS (atendidos); **IBGE-POP** (população total e porte).
+- **Mart 6 (total) ≠ mart 1 (urbano):** o mart 6 usa população **total** (IBGE) e
+  o mart 1 população **urbana** (SNIS); os nacionais (água **84,2%** aqui vs.
+  **93,4%** no mart 1) **não são comparáveis** e o dashboard **não deve cruzá-los**
+  — só comparar o **sentido** (ambos crescem com o porte / com a urbanização).
 - **Regra:** exige **teste de cobertura de junção** SNIS×IBGE antes do join (já
   rodado em [`pipeline/cobertura.py`](../pipeline/cobertura.py)); numerador
-  (atendidos SNIS) e denominador (população total IBGE) são de universos
-  distintos → coberturas < 100% são esperadas.
-- **Aceite:** **6 faixas × 12 anos = 72 linhas** (menos se alguma faixa-ano ficar
-  vazia — improvável). Soma de municípios das 6 faixas em 2021 = **5.570**
-  (confirmado no MCP). Cobertura de água cresce com o porte (**chute a
-  confirmar** o perfil exato).
+  (atendidos SNIS) e denominador (pop. IBGE dos informantes) → coberturas < 100%
+  esperadas.
+- **Aceite (confirmado no SELECT/MCP, 2026-11-08):** **6 faixas × 12 anos = 72
+  linhas**, PK `(faixa_porte, ano)` sem duplicatas; faixa fixa nos 12 anos
+  (1.250/2.520/1.120/354/277/49); **Σ`pop_total_ibge` das faixas em 2021 =
+  213.317.639** (= estimativa IBGE Brasil 2021); identidade informantes +
+  não-informantes = `municipios_faixa` em todos os grãos.
+  **Nacional 2021 (soma sobre soma):** água **84,20%** (= IN055 oficial 84,2%),
+  esgoto **55,81%** (= IN056 oficial 55,8%), auxiliar **66,95%**.
+- **Perfil por faixa 2021 (confirmado):** **esgoto (IN056) monótono crescente**
+  nas 6 faixas (23,60 → 77,15 ✓). **Água (IN055) cresce a partir da faixa 2**
+  (66,11 → 94,47); a **faixa 1 (72,20) > faixa 2 (66,11)** é registrada como
+  **fato, sem causa atribuída** (não testada). O auxiliar **não** é monótono
+  (viés de seleção) — por isso é só descritivo. Água > esgoto em todas as faixas.
+  **Exceção única:** 1 município da faixa 5 informa água, não informa atendido de
+  esgoto e tem infraestrutura física → missing isolado (D29).
 
 ---
 
@@ -533,19 +558,47 @@ município, aplicada a todos os anos do mart):
 |---|---|---|---|
 | `ano` | INTEGER | 2010–2021 | — |
 | `sigla_uf`, `nome_uf`, `nome_regiao` | VARCHAR | DTB | — |
-| `habitantes_sem_agua` | BIGINT | `Σ greatest(populacao_total_ibge − populacao_atendida_agua, 0)` por município | habitantes |
-| `habitantes_sem_esgoto` | BIGINT | `Σ greatest(populacao_total_ibge − populacao_atendida_esgoto, 0)` por município | habitantes |
+| `pop_total_ibge` | BIGINT | `Σ populacao_total_ibge` da UF no ano (residente total, D14) | habitantes |
+| `pop_informante_agua` | BIGINT | `Σ populacao_total_ibge` **dos informantes de água** (denominador dos percentuais) | habitantes |
+| `pop_sem_agua` | BIGINT | `Σ greatest(populacao_total_ibge − populacao_atendida_agua, 0)` **por município**, só informantes de água | habitantes |
+| `pop_sem_informacao_agua` | BIGINT | `Σ populacao_total_ibge` dos municípios **sem informação de água** — o "piso": esses ficam fora de `pop_sem_agua` | habitantes |
+| `pop_sem_esgoto` | BIGINT | **IN056/D30** — `Σ greatest(populacao_total_ibge − coalesce(populacao_atendida_esgoto,0), 0)` por município, **entre informantes de ÁGUA** (branco de esgoto = sem rede) | habitantes |
+| `pct_sem_agua` | DECIMAL | `100 × pop_sem_agua / nullif(pop_informante_agua,0)` (= 100 − IN055) | % |
+| `pct_sem_esgoto` | DECIMAL | `100 × pop_sem_esgoto / nullif(pop_informante_agua,0)` (= 100 − IN056; denominador = `pop_informante_agua`, **não** informantes de esgoto) | % |
 | `municipios_informantes_agua` | INTEGER | municípios com pop. IBGE e atendido água não nulos | contagem |
-| `municipios_informantes_esgoto` | INTEGER | idem esgoto | contagem |
+| `municipios_sem_informacao_agua` | INTEGER | municípios com pop. IBGE e atendido água **nulo** | contagem |
+| `municipios_informantes_esgoto` | INTEGER | municípios com atendido esgoto não nulo (**transparência**; não é denominador) | contagem |
 
-- **Denominador:** não é razão — **diferença absoluta** entre população total
-  IBGE-POP e atendida SNIS; `greatest(…, 0)` **por município** (revisões de série
-  podem dar atendido > total).
-- **Anos:** 2010–2021.
+- **"Sem serviço" não é razão** — é **diferença absoluta** entre população total
+  IBGE-POP e atendida SNIS, com `greatest(…, 0)` **por município** (revisões de
+  série podem dar atendido > total: 2010–2021, **água 63 grãos / 387.725 hab /
+  0,097%**; **esgoto 11 grãos / 90.404 hab** — imaterial, truncado em 0 na origem,
+  `pop_sem_* ≥ 0`).
+- **Esgoto = sem coleta por rede (D30):** mede atendimento por **rede coletora**;
+  quem usa **fossa séptica** conta como "sem esgoto". O rótulo correto é **"sem
+  coleta por rede"**, não "sem saneamento".
+- **Água — o absoluto é um PISO:** quem **não informa água** não entra em
+  `pop_sem_agua`; vai para `pop_sem_informacao_agua` (**3,13 mi hab em 258
+  municípios em 2021**), para o leitor ver o tamanho do que não se sabe.
+- **Esgoto pela IN056 (D30):** denominador = informantes de **água**; o branco de
+  esgoto vale como **"sem rede"** (2.531 de 2.532 brancos de 2021 com colunas
+  físicas de esgoto nulas/zero, D29). A **exceção única da faixa 5 do mart 6** (1
+  município informa água, não informa atendido de esgoto e tem infraestrutura
+  física) é missing isolado — aqui entra como "sem esgoto" (efeito desprezível).
+- **Anos:** 2010–2021. Universo = `silver.ibge_dtb_municipio`; **5.570 municípios**
+  com pop na janela (5101837 Boa Esperança do Norte/MT, D12, fora; 0 pop nula).
 - **Fontes:** **IBGE-POP**; SNIS; **IBGE-DTB**.
-- **Aceite:** até **27 × 12 = 324 linhas**. Conferência: `Σhabitantes_sem_agua`
-  nacional ≤ população total do Brasil no ano; **chute a confirmar** o valor por
-  UF após o SELECT.
+- **Aceite (confirmado no SELECT/MCP, 2026-11-08):** **27 × 12 = 324 linhas**, PK
+  `(ano, sigla_uf)` sem duplicatas; identidade `municipios_informantes_agua +
+  municipios_sem_informacao_agua = municípios da UF no ano`; `Σpop_total_ibge` por
+  ano = estimativa IBGE Brasil (2021 = **213.317.639**). **Nacional 2021:** sem
+  água **33,29 mi (15,84% ≈ 100 − IN055 84,2)**; sem esgoto **92,88 mi (44,19% =
+  100 − IN056 55,81)**. Percentual nacional confere com o oficial; o absoluto
+  oficial citado pela imprensa ("≈100 mi") é **não reconciliado** (base
+  desconhecida — 44,2% de 213,3 mi ≈ 94 mi), **sem causa atribuída**.
+- **Topo 2021 (confirmado):** maior **pct_sem_esgoto** no Norte — **RO 93,9%, AP
+  93,2%, PA 91,9%**; maior **pct_sem_agua** — **AP 67,1%, RO 54,0%, PA 51,8%**.
+  Maior absoluto de esgoto: **BA, RS, PA, PE, CE**.
 
 ---
 
@@ -562,9 +615,12 @@ município, aplicada a todos os anos do mart):
 |---|---|---|---|
 | `ano` | INTEGER | 2010–2021 | — |
 | `sigla_uf`, `nome_uf`, `nome_regiao` | VARCHAR | DTB | — |
-| `investimento_per_capita_com_atipicos` | DECIMAL | `Σinvestimento_total_prestador / nullif(Σpopulacao_total_ibge,0)` — **todos** os municípios | R$/hab (nominal) |
-| `investimento_per_capita_sem_atipicos` | DECIMAL | idem, **excluindo** os municípios com flag `investimento_atipico` | R$/hab (nominal) |
-| `municipios_informantes` | INTEGER | municípios com investimento e pop. IBGE não nulos | contagem |
+| `investimento_per_capita_com_atipicos` | DECIMAL | **D31:** `Σinvestimento_total_prestador / nullif(Σpopulacao_total_ibge,0)` **no universo comum** (municípios com investimento e pop IBGE não nulos — "entre os que declararam investimento") | R$/hab (nominal) |
+| `investimento_per_capita_sem_atipicos` | DECIMAL | idem, **excluindo** os municípios com flag `investimento_atipico` (mesmo universo comum, num e den) | R$/hab (nominal) |
+| `investimento_total` | DECIMAL | **transparência:** `Σinvestimento_total_prestador` no universo comum (numerador do per capita) — igual ao `investimento_total` do mart 5 por `(ano, sigla_uf)` | R$ (nominal) |
+| `investimento_total_sem_atipicos` | DECIMAL | **transparência:** idem, **excluindo** os atípicos — igual ao do mart 5 por `(ano, sigla_uf)` | R$ (nominal) |
+| `pop_informante_investimento` | DECIMAL | **transparência:** `Σpopulacao_total_ibge` do universo comum (denominador do per capita) | hab |
+| `municipios_informantes` | INTEGER | municípios com investimento e pop. IBGE não nulos (universo comum) | contagem |
 | `municipios_investimento_atipico` | INTEGER | municípios com a flag D4/D28, por grão | contagem |
 | `valor_nominal` | BOOLEAN | sempre `true` | — |
 
@@ -576,14 +632,36 @@ município, aplicada a todos os anos do mart):
   destacar **RN** (−29% do total se os atípicos fossem excluídos; D28); citar
   MA/SE/PE. Limiar como **constante nomeada** no SQL/executor. Hipótese de
   prestador regional é **hipótese, não fato** (sem coluna de prestador na silver).
-- **Denominador:** **população total IBGE-POP** (per capita por habitante).
+- **Denominador (D31):** **população total IBGE-POP do universo comum** —
+  municípios com investimento **e** pop IBGE não nulos. O per capita é **"entre os
+  municípios que declararam investimento"**. **Caveat do branco:** a consulta
+  mostra que o nulo de investimento é majoritariamente de município que informou o
+  SNIS (tem despesa/receita) e deixou o investimento em branco, mas **não decide**
+  se o nulo é "zero investido" ou "não declarado" (não há coluna física que
+  resolva; há 423 zeros declarados em 2021 — indício, não prova). **Sensibilidade
+  2021:** R$ **75,82/hab** (universo comum) contra R$ **71,71/hab** se todo nulo
+  fosse zero (−5,4%) — registrada aqui, **não vira coluna**.
+- **Comparação externa (não reconciliada):** gráfico do Senado (ano-base SNIS
+  2021) mostra **R$ 82,71/hab**; o mart dá **R$ 75,82/hab** (−8,3%). Registrado
+  como **não reconciliado** (fonte é um gráfico, vale só como ordem de grandeza;
+  a diferença de base populacional é **hipótese não testada**, sem causa
+  atribuída). Fonte: Senado, doc. `ca46fdf4-bc5e-4ec1-a2ac-2951503d84f8`, acesso
+  2026-11-08. A conferência com o mart 5 é **consistência interna** (mesma silver,
+  trava a regra do atípico contra deriva) — **não** é validação externa.
 - **Anos:** 2010–2021.
 - **Fontes:** SNIS (investimento); **IBGE-POP**; **IBGE-DTB**.
 - **Regra:** **R$ nominal** (R$/hab por ano, não comparável entre anos sem
   correção); teste de cobertura de junção antes do join.
-- **Aceite:** até **324 linhas** (27 × 12). `municipios_investimento_atipico`
-  nacional 2010–2021 = **120** (D28). Diferença entre as duas colunas é grande
-  só em RN. **Chute a confirmar** o per capita por UF.
+- **Aceite (confirmado no SELECT, 2026-11-08):** **324 linhas** (27 × 12), **12
+  colunas**, PK `(ano, sigla_uf)` sem duplicatas; dims DTB não nulas. Universo =
+  **5.570 municípios/ano** (5.565 em 2010 e 2011). `municipios_investimento_atipico`
+  nacional 2010–2021 = **120** (D28), série por ano **6, 2, 10, 5, 11, 5, 4, 11,
+  10, 48, 3, 5**. Per capita nacional **com atípicos** 44,26 (2010) / 72,17 (2019)
+  / 75,82 (2021); **sem atípicos** 42,88 / 61,36 / 75,56. **RN 2019:** 443,38 →
+  218,91 R$/hab (−50,6%, 45 atípicos) — deixa de ser o outlier extremo. Diferença
+  entre as duas colunas é grande **só em RN** (pico 2019). Conferência cruzada por
+  `(ano, sigla_uf)` contra o mart 5: **0 divergências** em `investimento_total`,
+  `investimento_total_sem_atipicos` e `municipios_investimento_atipico`.
 
 ---
 
@@ -678,6 +756,8 @@ Uma definição, uma fórmula e uma fonte por termo.
 | **Painel fixo** (regra D19 + D24) | **Regra (D19):** município com valor nas **colunas-chave** em **todos os 12 anos de 2010 a 2021**. **Cada família de índices aplica a regra às suas próprias colunas-chave (D24).** **Painel urbano de água** (colunas-chave `populacao_urbana_atendida_agua` e `populacao_urbana`) = **4.472 municípios** (Rodada 3.3), as 27 UFs, usado nos **marts 4 e 10**. **Painel de esgoto** (mart 2, D24): **coleta** (`volume_esgoto_coletado`, `volume_agua_consumido` > 0) = **1.473**; **tratamento** (`volume_esgoto_tratado`, `volume_esgoto_coletado` > 0) = **1.440** (painéis distintos). | silver SNIS; regra definida uma vez aqui. |
 | **Linha inconsistente (IN049)** | município com `(AG006+AG018−AG024) < AG010`. | excluída com flag (D3), contada por ano. |
 | **Investimento atípico** (D4/D28) | município com investimento per capita > **R$ 1.000/hab** (nominal; = p99,8 com pop IBGE). | flag `investimento_atipico` (marts 5 e 8); hipótese de prestador regional é hipótese, não fato. |
+| **População sem água** (mart 7) | déficit absoluto por município entre informantes de água: `Σ greatest(populacao_total_ibge − populacao_atendida_agua, 0)`. Quem não informa água fica fora (vai para `pop_sem_informacao_agua` — o absoluto é um piso). | SNIS/IBGE-POP; `pct_sem_agua = 100 − IN055`. |
+| **População sem esgoto** (mart 7, **D30/IN056**) | **sem coleta por rede**: `Σ greatest(populacao_total_ibge − coalesce(populacao_atendida_esgoto,0), 0)` entre os **informantes de ÁGUA** (branco de esgoto = sem rede; fossa séptica conta como sem esgoto). Denominador do percentual = `pop_informante_agua`, **não** informantes de esgoto. A convenção antiga (só informantes de esgoto) é **revogada pela D30**. | SNIS/IBGE-POP; `pct_sem_esgoto = 100 − IN056`. |
 | **Perda de água** | IN049 = `(AG006+AG018−AG010−AG024)/(AG006+AG018−AG024)×100`. | SNIS (glossário 2022, D3). |
 | **Investimento per capita** | `investimento_total_prestador / populacao_total_ibge`. | SNIS/IBGE-POP; R$ nominal (D4/D14). |
 | **Tarifa média** (D22) | `Σreceita_operacional_direta / (Σ(volume_agua_faturado+volume_esgoto_faturado) × 1000)`, R$/m³ nominal. | SNIS (FN001 ÷ (AG011+ES007)). |
@@ -932,6 +1012,8 @@ Restam apenas itens gerais de dicionário SNIS, que não bloqueiam a implementa�
 | Investimento total Brasil 2021 (mart 5) | R$ 15.297.535.452,19 |
 | Mart 5 — linhas / tarifa 2010→2021 / despesa unit. DTS 2010→2021 | 754 / 2,18→4,12 / 2,06→3,87 R$/m³ |
 | Mart 5 — municípios atípicos 2010–2021 (R$ 1.000/hab, D28) | 120 (RN −29%; pico 2019 = 48, 45 em RN) |
+| Mart 8 — per capita nacional com/sem atípicos 2010/2019/2021 (D31) | com 44,26/72,17/75,82 · sem 42,88/61,36/75,56 R$/hab |
+| Mart 8 — RN 2019 (com→sem atípicos) / vs todos os 5.570 em 2021 | 443,38→218,91 R$/hab · 75,82 (comum) vs 71,71 (todos, −5,4%) |
 
 ## 12. Consultas MCP usadas (referência)
 
