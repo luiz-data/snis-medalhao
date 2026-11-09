@@ -63,6 +63,7 @@ def ibge_db(tmp_path_factory):
 # POP — critérios P1–P9
 # ===========================================================================
 
+
 def test_pop_linhas_e_tipos(ibge_db):
     con = _ro(ibge_db)
     try:
@@ -124,13 +125,14 @@ def test_pop_nulos_conhecidos_e_sanidade(ibge_db):
 # PIB — critérios B1–B8
 # ===========================================================================
 
+
 def test_pib_linhas_tipos_sanidade(ibge_db):
     con = _ro(ibge_db)
     try:
         assert con.execute(f"SELECT count(*) FROM {PIB}").fetchone()[0] == PIB_LINHAS
-        tipo = {
-            c[0]: c[1] for c in con.execute(f"DESCRIBE {PIB}").fetchall()
-        }["pib_municipio"]
+        tipo = {c[0]: c[1] for c in con.execute(f"DESCRIBE {PIB}").fetchall()}[
+            "pib_municipio"
+        ]
         sp = con.execute(
             f"SELECT pib_municipio FROM {PIB} WHERE id_municipio = '{SP}' AND ano = 2021"
         ).fetchone()[0]
@@ -214,6 +216,7 @@ def test_pib_negativos_acima_do_teto_bloqueia(ibge_db, tmp_path):
 # DTB — critérios D1–D5
 # ===========================================================================
 
+
 def test_dtb_linhas_chave_ufs(ibge_db):
     con = _ro(ibge_db)
     try:
@@ -224,7 +227,8 @@ def test_dtb_linhas_chave_ufs(ibge_db):
         ).fetchone()[0]
         ufs = con.execute(f"SELECT count(DISTINCT sigla_uf) FROM {DTB}").fetchone()[0]
         regioes = {
-            r[0] for r in con.execute(f"SELECT DISTINCT nome_regiao FROM {DTB}").fetchall()
+            r[0]
+            for r in con.execute(f"SELECT DISTINCT nome_regiao FROM {DTB}").fetchall()
         }
     finally:
         con.close()
@@ -249,13 +253,20 @@ def test_dtb_municipio_extra_presente(ibge_db):
 # Mapa estático de UF — completude e cruzamento com o SNIS
 # ===========================================================================
 
+
 def test_mapa_uf_completude():
     """27 entradas, siglas únicas, macrorregião coerente com o 1º dígito."""
     assert len(MAPA_UF) == N_UF
     siglas = [s for s, _ in MAPA_UF.values()]
     assert len(set(siglas)) == N_UF
     assert {r for _, r in MAPA_UF.values()} == set(MACRORREGIOES)
-    primeiro = {"1": "Norte", "2": "Nordeste", "3": "Sudeste", "4": "Sul", "5": "Centro-Oeste"}
+    primeiro = {
+        "1": "Norte",
+        "2": "Nordeste",
+        "3": "Sudeste",
+        "4": "Sul",
+        "5": "Centro-Oeste",
+    }
     for cod, (_sigla, regiao) in MAPA_UF.items():
         assert primeiro[cod[0]] == regiao
 
@@ -295,6 +306,7 @@ def test_sigla_derivada_bate_com_snis(ibge_db):
 # ===========================================================================
 # Cobertura — D7 e D12, incluindo os casos BLOQUEANTES (cópias temporárias)
 # ===========================================================================
+
 
 def _copia(banco_origem, destino):
     shutil.copy(banco_origem, destino)

@@ -1,4 +1,3 @@
-
 import sys
 
 from pipeline.db import PASTA_RAW, conectar
@@ -20,9 +19,7 @@ def main():
     con = conectar()
     try:
         linhas_fonte = con.execute(f"SELECT count(*) FROM {fonte}").fetchone()[0]
-        colunas_fonte = len(
-            con.execute(f"DESCRIBE SELECT * FROM {fonte}").fetchall()
-        )
+        colunas_fonte = len(con.execute(f"DESCRIBE SELECT * FROM {fonte}").fetchall())
 
         con.execute("BEGIN TRANSACTION")
         con.execute("CREATE SCHEMA IF NOT EXISTS bronze")
@@ -34,8 +31,7 @@ def main():
         if linhas_tabela != linhas_fonte:
             con.execute("ROLLBACK")
             print(
-                f"Divergência de linhas: arquivo={linhas_fonte}, "
-                f"tabela={linhas_tabela}"
+                f"Divergência de linhas: arquivo={linhas_fonte}, tabela={linhas_tabela}"
             )
             sys.exit(1)
 

@@ -104,8 +104,7 @@ def _preparar_copia(banco_origem, destino, corrupcao_sql):
 def _primeira_coluna(sql_set):
     """UPDATE que altera a linha de menor rowid (uma única linha)."""
     return (
-        f"UPDATE {BRONZE} SET {sql_set} "
-        f"WHERE rowid = (SELECT min(rowid) FROM {BRONZE})"
+        f"UPDATE {BRONZE} SET {sql_set} WHERE rowid = (SELECT min(rowid) FROM {BRONZE})"
     )
 
 
@@ -161,16 +160,10 @@ def test_tipos(silver_db):
 def test_nulos_por_coluna(silver_db):
     con = _ro(silver_db)
     try:
-        expr_bronze = ", ".join(
-            f"count(*) - count({q(nome_bronze(c))})" for c in TODAS
-        )
+        expr_bronze = ", ".join(f"count(*) - count({q(nome_bronze(c))})" for c in TODAS)
         expr_silver = ", ".join(f"count(*) - count({q(c)})" for c in TODAS)
-        nulos_bronze = con.execute(
-            f"SELECT {expr_bronze} FROM {BRONZE}"
-        ).fetchone()
-        nulos_silver = con.execute(
-            f"SELECT {expr_silver} FROM {SILVER}"
-        ).fetchone()
+        nulos_bronze = con.execute(f"SELECT {expr_bronze} FROM {BRONZE}").fetchone()
+        nulos_silver = con.execute(f"SELECT {expr_silver} FROM {SILVER}").fetchone()
     finally:
         con.close()
     assert list(nulos_bronze) == list(nulos_silver)
@@ -186,15 +179,9 @@ def test_somas_decimais(silver_db):
         expr_bronze = ", ".join(
             f"sum(CAST({q(nome_bronze(c))} AS DECIMAL(38,6)))" for c in DECIMAIS
         )
-        expr_silver = ", ".join(
-            f"sum(CAST({q(c)} AS DECIMAL(38,6)))" for c in DECIMAIS
-        )
-        somas_bronze = con.execute(
-            f"SELECT {expr_bronze} FROM {BRONZE}"
-        ).fetchone()
-        somas_silver = con.execute(
-            f"SELECT {expr_silver} FROM {SILVER}"
-        ).fetchone()
+        expr_silver = ", ".join(f"sum(CAST({q(c)} AS DECIMAL(38,6)))" for c in DECIMAIS)
+        somas_bronze = con.execute(f"SELECT {expr_bronze} FROM {BRONZE}").fetchone()
+        somas_silver = con.execute(f"SELECT {expr_silver} FROM {SILVER}").fetchone()
     finally:
         con.close()
     assert list(somas_bronze) == list(somas_silver)
@@ -209,15 +196,9 @@ def test_somas_inteiras(silver_db):
         expr_bronze = ", ".join(
             f"sum(CAST({q(nome_bronze(c))} AS DECIMAL(38,6)))" for c in INTEIROS
         )
-        expr_silver = ", ".join(
-            f"sum(CAST({q(c)} AS DECIMAL(38,6)))" for c in INTEIROS
-        )
-        somas_bronze = con.execute(
-            f"SELECT {expr_bronze} FROM {BRONZE}"
-        ).fetchone()
-        somas_silver = con.execute(
-            f"SELECT {expr_silver} FROM {SILVER}"
-        ).fetchone()
+        expr_silver = ", ".join(f"sum(CAST({q(c)} AS DECIMAL(38,6)))" for c in INTEIROS)
+        somas_bronze = con.execute(f"SELECT {expr_bronze} FROM {BRONZE}").fetchone()
+        somas_silver = con.execute(f"SELECT {expr_silver} FROM {SILVER}").fetchone()
     finally:
         con.close()
     assert list(somas_bronze) == list(somas_silver)
@@ -345,9 +326,7 @@ def test_idempotencia(silver_db, monkeypatch):
     def assinatura():
         con = _ro(silver_db)
         try:
-            linhas = con.execute(
-                f"SELECT count(*) FROM {SILVER}"
-            ).fetchone()[0]
+            linhas = con.execute(f"SELECT count(*) FROM {SILVER}").fetchone()[0]
             nulas = con.execute(
                 "SELECT "
                 + " + ".join(f"(count(*) - count({q(c)}))" for c in TODAS)
@@ -374,9 +353,7 @@ def test_idempotencia(silver_db, monkeypatch):
 def test_bloqueio_decimal_3_casas(silver_db, tmp_path, monkeypatch):
     """B4: decimal com 3 casas é detectado no texto ANTES do CAST."""
     copia = tmp_path / "snis.duckdb"
-    _preparar_copia(
-        silver_db, copia, _primeira_coluna("extensao_rede_agua = '10.239'")
-    )
+    _preparar_copia(silver_db, copia, _primeira_coluna("extensao_rede_agua = '10.239'"))
     monkeypatch.setattr(db_mod, "CAMINHO_BANCO", copia)
     with pytest.raises(SystemExit) as exc:
         transf_mod.main()
@@ -387,9 +364,7 @@ def test_bloqueio_decimal_3_casas(silver_db, tmp_path, monkeypatch):
 def test_bloqueio_nao_numerico(silver_db, tmp_path, monkeypatch):
     """B2: valor que não converte para o tipo-alvo."""
     copia = tmp_path / "snis.duckdb"
-    _preparar_copia(
-        silver_db, copia, _primeira_coluna("extensao_rede_agua = 'abc'")
-    )
+    _preparar_copia(silver_db, copia, _primeira_coluna("extensao_rede_agua = 'abc'"))
     monkeypatch.setattr(db_mod, "CAMINHO_BANCO", copia)
     with pytest.raises(SystemExit) as exc:
         transf_mod.main()
@@ -400,9 +375,7 @@ def test_bloqueio_nao_numerico(silver_db, tmp_path, monkeypatch):
 def test_bloqueio_string_vazia(silver_db, tmp_path, monkeypatch):
     """B9: '' (ou só espaços) é quebra de contrato da ingestão."""
     copia = tmp_path / "snis.duckdb"
-    _preparar_copia(
-        silver_db, copia, _primeira_coluna("extensao_rede_agua = '   '")
-    )
+    _preparar_copia(silver_db, copia, _primeira_coluna("extensao_rede_agua = '   '"))
     monkeypatch.setattr(db_mod, "CAMINHO_BANCO", copia)
     with pytest.raises(SystemExit) as exc:
         transf_mod.main()

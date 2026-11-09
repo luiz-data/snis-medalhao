@@ -54,9 +54,7 @@ def test_linhas(bronze_db):
 
 
 def test_colunas(bronze_db):
-    colunas = bronze_db.execute(
-        "DESCRIBE bronze.municipio_agua_esgoto"
-    ).fetchall()
+    colunas = bronze_db.execute("DESCRIBE bronze.municipio_agua_esgoto").fetchall()
     assert len(colunas) == 133
 
 
@@ -78,17 +76,14 @@ def test_tudo_varchar(bronze_db):
 def test_nomes_e_ordem(bronze_db):
     colunas_tabela = [
         r[0]
-        for r in bronze_db.execute(
-            "DESCRIBE bronze.municipio_agua_esgoto"
-        ).fetchall()
+        for r in bronze_db.execute("DESCRIBE bronze.municipio_agua_esgoto").fetchall()
     ]
     fonte = (
         f"read_csv('{ARQUIVO_FONTE}', all_varchar=true, header=true, "
         f"delim=',', encoding='utf-8')"
     )
     colunas_csv = [
-        r[0]
-        for r in bronze_db.execute(f"DESCRIBE SELECT * FROM {fonte}").fetchall()
+        r[0] for r in bronze_db.execute(f"DESCRIBE SELECT * FROM {fonte}").fetchall()
     ]
     assert colunas_tabela == colunas_csv
 
@@ -106,8 +101,7 @@ def test_nulos_consistentes(bronze_db):
         f'SELECT count(*) - count("{coluna}") FROM {fonte}'
     ).fetchone()[0]
     nulos_tabela = bronze_db.execute(
-        f'SELECT count(*) - count("{coluna}") '
-        f"FROM bronze.municipio_agua_esgoto"
+        f'SELECT count(*) - count("{coluna}") FROM bronze.municipio_agua_esgoto'
     ).fetchone()[0]
     assert nulos_tabela == nulos_fonte
 
@@ -120,9 +114,7 @@ def test_idempotencia(bronze_db):
     total = bronze_db.execute(
         "SELECT count(*) FROM bronze.municipio_agua_esgoto"
     ).fetchone()[0]
-    colunas = bronze_db.execute(
-        "DESCRIBE bronze.municipio_agua_esgoto"
-    ).fetchall()
+    colunas = bronze_db.execute("DESCRIBE bronze.municipio_agua_esgoto").fetchall()
     assert total == 119_256
     assert len(colunas) == 133
 
@@ -131,9 +123,7 @@ def test_idempotencia(bronze_db):
 
 
 def test_arquivo_ausente(monkeypatch):
-    monkeypatch.setattr(
-        ingestao_mod, "ARQUIVO", Path("/inexistente/nada.csv.gz")
-    )
+    monkeypatch.setattr(ingestao_mod, "ARQUIVO", Path("/inexistente/nada.csv.gz"))
     with pytest.raises(SystemExit) as exc:
         ingestao_mod.main()
     assert exc.value.code == 1

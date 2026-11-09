@@ -63,6 +63,7 @@ def nome_silver(col_bronze):
     """Traduz um nome de coluna da bronze para o nome usado na silver."""
     return RENOMEACOES.get(col_bronze, col_bronze)
 
+
 # --- Anexo A da spec: fonte única de verdade dos tipos -----------------------
 # As listas usam os nomes SILVER (ou seja, já com a correção de digitação).
 # `ano` entra aqui como INTEGER.
@@ -344,8 +345,7 @@ def validar_sem_vazios(con):
         c = q(col)
         # trim(c) = '' cobre '' e strings só com espaços; NULL é permitido.
         n = con.execute(
-            f"SELECT count(*) FROM {BRONZE} "
-            f"WHERE {c} IS NOT NULL AND trim({c}) = ''"
+            f"SELECT count(*) FROM {BRONZE} WHERE {c} IS NOT NULL AND trim({c}) = ''"
         ).fetchone()[0]
         if n:
             erro(
@@ -396,8 +396,7 @@ def validar_chave(con):
     ).fetchall()
     if dups:
         linhas = "\n".join(
-            f"  ano={a} id_municipio={m}: {fmt(n)} ocorrências"
-            for a, m, n in dups
+            f"  ano={a} id_municipio={m}: {fmt(n)} ocorrências" for a, m, n in dups
         )
         erro(
             con,
@@ -422,9 +421,7 @@ def contar_negativos(con):
     with_neg = []
     por_prefixo = {"despesa": 0, "indice": 0, "volume": 0}
     for c in numericas:
-        n = con.execute(
-            f"SELECT count(*) FROM {SILVER} WHERE {q(c)} < 0"
-        ).fetchone()[0]
+        n = con.execute(f"SELECT count(*) FROM {SILVER} WHERE {q(c)} < 0").fetchone()[0]
         if n:
             with_neg.append(c)
             for pref in por_prefixo:
@@ -438,9 +435,9 @@ def contar_indices_acima_100(con):
     cols = [c for c in DECIMAIS if c.startswith("indice_")]
     acima = 0
     for c in cols:
-        n = con.execute(
-            f"SELECT count(*) FROM {SILVER} WHERE {q(c)} > 100"
-        ).fetchone()[0]
+        n = con.execute(f"SELECT count(*) FROM {SILVER} WHERE {q(c)} > 100").fetchone()[
+            0
+        ]
         if n:
             acima += 1
     return acima, len(cols)
@@ -495,9 +492,7 @@ def imprimir_saida(con):
         f"indice_* {fmt(por_pref['indice'])} · "
         f"volume {fmt(por_pref['volume'])} · ...)"
     )
-    print(
-        f"- populacao_atendida_agua > populacao_urbana: {fmt(a2)} linhas"
-    )
+    print(f"- populacao_atendida_agua > populacao_urbana: {fmt(a2)} linhas")
     print(f"- indice_* acima de 100: {fmt(a3_cols)} colunas")
     nulo_total = "sim" if (tot_2022 and nulos_2022 == tot_2022) else "não"
     print(
@@ -546,12 +541,8 @@ def main():
         )
 
         # B8: espelho fiel em volume e largura.
-        linhas_silver = con.execute(
-            f"SELECT count(*) FROM {SILVER}"
-        ).fetchone()[0]
-        colunas_silver = len(
-            con.execute(f"DESCRIBE {SILVER}").fetchall()
-        )
+        linhas_silver = con.execute(f"SELECT count(*) FROM {SILVER}").fetchone()[0]
+        colunas_silver = len(con.execute(f"DESCRIBE {SILVER}").fetchall())
         if linhas_silver != linhas_bronze:
             erro(
                 con,

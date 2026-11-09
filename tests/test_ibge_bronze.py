@@ -4,7 +4,6 @@ As contagens esperadas vêm de pipeline.ingestao_ibge (as mesmas constantes que
 o código usa em BB2/BB3), não são recopiadas aqui.
 """
 
-
 import duckdb
 import pytest
 

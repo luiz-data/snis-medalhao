@@ -100,9 +100,7 @@ def main():
     con = conectar()
     try:
         _, dtb_bloqueia = cobertura_dtb(con)
-        pop_bloqueia = cobertura_por_ano(
-            con, "POP", "silver.ibge_populacao_municipio"
-        )
+        pop_bloqueia = cobertura_por_ano(con, "POP", "silver.ibge_populacao_municipio")
         pib_bloqueia = cobertura_por_ano(con, "PIB", "silver.ibge_pib_municipio")
     finally:
         con.close()

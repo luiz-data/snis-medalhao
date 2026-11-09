@@ -56,11 +56,14 @@ def erro(con, msg):
 
 def _bronze_existe(con, tabela):
     schema, nome = tabela.split(".")
-    return con.execute(
-        "SELECT count(*) FROM duckdb_tables() "
-        "WHERE schema_name = ? AND table_name = ?",
-        [schema, nome],
-    ).fetchone()[0] > 0
+    return (
+        con.execute(
+            "SELECT count(*) FROM duckdb_tables() "
+            "WHERE schema_name = ? AND table_name = ?",
+            [schema, nome],
+        ).fetchone()[0]
+        > 0
+    )
 
 
 def _um(con, sql):
@@ -71,6 +74,7 @@ def _um(con, sql):
 # 5.1 — silver.ibge_populacao_municipio
 # ===========================================================================
 
+
 def silver_populacao(con):
     bronze = "bronze.ibge_populacao_municipio"
     silver = "silver.ibge_populacao_municipio"
@@ -78,10 +82,7 @@ def silver_populacao(con):
         erro(con, f"[BLOQUEANTE] Tabela {bronze} ausente. Rode a bronze antes.")
 
     # IA6/IB9: linha sem id_municipio. Dentro da janela é bloqueante.
-    sem_id = (
-        f"FROM {bronze} "
-        f"WHERE (id_municipio IS NULL OR trim(id_municipio) = '')"
-    )
+    sem_id = f"FROM {bronze} WHERE (id_municipio IS NULL OR trim(id_municipio) = '')"
     na_janela = _um(
         con,
         f"SELECT count(*) {sem_id} "
@@ -93,9 +94,7 @@ def silver_populacao(con):
             f"[BLOQUEANTE] IB9: {fmt(na_janela)} linha(s) sem id_municipio "
             f"dentro de {JANELA_INICIO}–{JANELA_FIM}.",
         )
-    excluidas = con.execute(
-        f"SELECT ano, populacao {sem_id} ORDER BY ano"
-    ).fetchall()
+    excluidas = con.execute(f"SELECT ano, populacao {sem_id} ORDER BY ano").fetchall()
 
     # Pré-validação (regex) sobre as linhas que FICAM (já sem id vazio).
     validas = (
@@ -186,6 +185,7 @@ def silver_populacao(con):
 # 5.2 — silver.ibge_pib_municipio
 # ===========================================================================
 
+
 def silver_pib(con):
     bronze = "bronze.ibge_pib_municipio"
     silver = "silver.ibge_pib_municipio"
@@ -196,7 +196,8 @@ def silver_pib(con):
 
     # Pré-validação de formato (regex), chave e valor.
     mal_ano = _um(
-        con, f"SELECT count(*) FROM {bronze} WHERE NOT regexp_full_match(ano, '^[0-9]{{4}}$')"
+        con,
+        f"SELECT count(*) FROM {bronze} WHERE NOT regexp_full_match(ano, '^[0-9]{{4}}$')",
     )
     mal_id = _um(
         con,
@@ -267,7 +268,8 @@ def silver_pib(con):
         if dup:
             erro(con, f"[BLOQUEANTE] IB6: {fmt(dup)} chave(s) (ano, id) repetida(s).")
         nulos_chave = _um(
-            con, f"SELECT count(*) FROM {silver} WHERE ano IS NULL OR id_municipio IS NULL"
+            con,
+            f"SELECT count(*) FROM {silver} WHERE ano IS NULL OR id_municipio IS NULL",
         )
         if nulos_chave:
             erro(con, f"[BLOQUEANTE] IB6: {fmt(nulos_chave)} chave(s) nula(s).")
@@ -295,6 +297,7 @@ def silver_pib(con):
 # 5.3 — silver.ibge_dtb_municipio
 # ===========================================================================
 
+
 def silver_dtb(con):
     bronze = "bronze.ibge_dtb_municipio"
     silver = "silver.ibge_dtb_municipio"
@@ -306,10 +309,12 @@ def silver_dtb(con):
 
     # Pré-validação: id 7 dígitos, cod_uf 2 dígitos e presente no mapa das 27 UFs.
     mal_id = _um(
-        con, f"SELECT count(*) FROM {bronze} WHERE NOT regexp_full_match({id_col}, '^[0-9]{{7}}$')"
+        con,
+        f"SELECT count(*) FROM {bronze} WHERE NOT regexp_full_match({id_col}, '^[0-9]{{7}}$')",
     )
     mal_uf = _um(
-        con, f"SELECT count(*) FROM {bronze} WHERE NOT regexp_full_match({cod_uf}, '^[0-9]{{2}}$')"
+        con,
+        f"SELECT count(*) FROM {bronze} WHERE NOT regexp_full_match({cod_uf}, '^[0-9]{{2}}$')",
     )
     codigos = ", ".join(f"'{c}'" for c in MAPA_UF)
     fora_mapa = _um(

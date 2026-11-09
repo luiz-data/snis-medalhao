@@ -75,7 +75,6 @@ def case_sql(coluna, indice):
     pré-validação da silver reprova (bloqueante).
     """
     whens = " ".join(
-        f"WHEN '{cod}' THEN '{destino[indice]}'"
-        for cod, destino in MAPA_UF.items()
+        f"WHEN '{cod}' THEN '{destino[indice]}'" for cod, destino in MAPA_UF.items()
     )
     return f"CASE {coluna} {whens} END"
