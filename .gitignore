@@ -3,7 +3,10 @@ data/
 __pycache__/
 .ruff_cache/
 .pytest_cache/
+.coverage
+htmlcov/
 *.duckdb
 
 .claude/settings.local.json
 .vscode/
+design/referencias/
