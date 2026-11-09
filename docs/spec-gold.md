@@ -2,9 +2,9 @@
 
 | | |
 |---|---|
-| **Status** | aprovada, aguardando implementação — **só documentação** (nenhum código, SQL ou dado criado) |
+| **Status** | **implementada** — 10 marts em `sql/gold/NN_*.sql`, executor `pipeline/gold.py`, testes em `tests/test_gold.py` (todos verdes); pipeline reconstruído do zero em 2026-11-08 |
 | **Versão** | 2 (aplica D18–D21) |
-| **Data** | 2026-11-08 |
+| **Data** | 2026-11-08 (implementada) |
 | **Responsável** | Luiz |
 | **Banco** | `snis.duckdb` · schema `gold` (novo) |
 | **Origem** | `silver.municipio_agua_esgoto` + `silver.ibge_populacao_municipio` + `silver.ibge_pib_municipio` + `silver.ibge_dtb_municipio` (tudo somente leitura) |
@@ -914,8 +914,9 @@ temporário** via `tmp_path_factory`, **monkeypatch de
 
 ## 6. Conferências cruzadas (entre marts e com a silver)
 
-Números que o MCP permitiu confirmar marcados **[confirmado]**; os demais são
-**[a confirmar no SELECT]**.
+Todas as 8 conferências estão **[confirmado]** por teste (2026-11-08); as duas
+reservadas para a aula 4 (C9, C10) seguem como dashboard. O rótulo original
+"[a confirmar no SELECT]" foi substituído pelo valor medido em cada item.
 
 1. **Investimento Brasil = Σ UFs (2021):** `Σinvestimento_total` do mart 5 nas 27
    UFs = **R$ 15.297.535.452,19** [confirmado].
@@ -925,13 +926,20 @@ Números que o MCP permitiu confirmar marcados **[confirmado]**; os demais são
    2010–2021), usado nos marts 4 e 10 [confirmado].
 4. **Faixas de porte 2021 (mart 6)** somam **5.570** municípios
    (1.250/2.520/1.120/354/277/49) [confirmado].
-5. **Exclusões D3 (IN049):** `linhas_inconsistentes_in049` por ano na janela =
-   **0–57** (Verificação D3) [a confirmar no SELECT com a fórmula completa].
-6. **Exclusões D5 (A2):** `linhas_excluidas_a2` por ano 2010–2021 ≤ ~43 em água
-   (Rodada 3.6a) [a confirmar no SELECT].
+5. **Exclusões D3 (IN049):** o `linhas_inconsistentes_in049` do mart soma **duas**
+   componentes (D3-revisado): (a) inconsistente estrita `den < AG010` e (c)
+   denominador não-positivo `den ≤ 0`, com `den = AG006+AG018−AG024`. Por ano na
+   janela 2010–2021: componente **(a) = 0–57** (é a esta que se refere o "0–57" da
+   Verificação D3), componente (c) = 0–45, e o **total (a)+(c) = 7–88** (480 no
+   total). **[confirmado]** por consulta independente na silver, sem usar o mart
+   (0 anos divergentes); ver `test_m3_in049_inconsistentes_vs_silver`.
+6. **Exclusões D5 (A2):** `excluidas_a2_agua` por ano 2010–2021, **máx. 43 (2016)**,
+   total 172 na janela. **[confirmado]** — `test_m1_exclusao_a2_por_ano`.
 7. **`municipios_informantes` coerente com a silver:** a soma por ano do mart 1
-   deve bater com a contagem de informantes urbanos da Rodada 3.2 (ex.: água
-   urbana 2021 ≈ **5.302**) [confirmado parcialmente].
+   bate com a contagem **viva** de informantes urbanos na silver (num+den não
+   nulos e não-A2). Água urbana 2021: com informação **5.302** − **18** (A2) =
+   **5.284** informantes. **[confirmado]** por consulta independente (não por
+   constante); ver `test_m1_informantes_agua_2021`.
 8. **Atípicos D4/D28 (marts 5 e 8):** `Σmunicipios_investimento_atipico`
    2010–2021 = **120** (limiar R$ 1.000/hab; RN −29%) [confirmado no SELECT].
 
@@ -1037,11 +1045,11 @@ D3, isso é um **conflito a listar** (reabrir D3), não a resolver aqui.
 | 3 | ~~nº de linhas e inconsistentes~~ **CONFIRMADO: 754 linhas (756 − 2 pares iniciais); perdas ∈ [0; 94,48]; índice nacional 2010–21 = 37,42%; consumo per capita 2021 = 151,3 L/hab·dia (IN022, D25); `excluidas_consumo_acima` 0–57/ano; único extremo Vilhena/RO 1997** |
 | 4 | ~~nº de linhas = painel fixo único (4.472) menos A2~~ **CONFIRMADO: 4.431 linhas × 10 colunas = painel 4.472 − 41 A2 (26 em 2010, 16 em 2021); PK única; posicao 1..4.431 sem buracos; posicao_empate 1..4.429; variacao_pp ∈ [−100,+100]; 12 variacao_extrema; D26** |
 | 5 | ~~nº de linhas (≤ 756) nos anos iniciais~~ **CONFIRMADO: 754 linhas × 16 colunas (756 − 2: sem 1996-AC/1996-PI); PK única; tarifa 2,18→4,12; despesa unitária (DTS/FN017, D27) 2,06→3,87; investimento BR 2021 = R$ 15.297.535.452,19; 120 atípicos (D28, RN −29%); extremos de tarifa/despesa só em 1995–2000** |
-| 6 | perfil de cobertura por faixa |
-| 7 | `habitantes_sem_*` por UF |
-| 8 | per capita por UF; `municipios_investimento_atipico` = 120 (D28) |
-| 9 | reavaliar PIB per capita negativo em 2021 (Guamaré/RN) |
-| 10 | distribuição exata dos quartis (empates no `ntile`) |
+| 6 | ~~perfil de cobertura por faixa~~ **CONFIRMADO: 72 linhas (6×12); faixas 2021 = 1.250/2.520/1.120/354/277/49 = 5.570; Σ pop faixas 2021 = 213.317.639** — `test_m6_linhas_pk_colunas`, `test_m6_faixa_fixa_nos_12_anos`, `test_m6_pop_total_ibge_2021` |
+| 7 | ~~`habitantes_sem_*` por UF~~ **CONFIRMADO: 324 linhas (27×12); sem água 2021 = 33.285.121 (15,8%); sem esgoto 2021 = 92.879.110 (44,19%, IN056/D30); Σ pop por UF = IBGE por ano** — `test_m7_nacional_2021`, `test_m7_pop_por_ano_igual_ibge` |
+| 8 | ~~per capita por UF; `municipios_investimento_atipico` = 120 (D28)~~ **CONFIRMADO: 324 linhas; per capita nacional 2021 = R$ 75,82/hab; 120 atípicos; = mart 5 por (ano,UF); RN 2019 443,38→218,91** — `test_m8_linhas_pk_colunas`, `test_m8_serie_atipicos`, `test_m8_cross_mart5`, `test_m8_rn_2019` |
+| 9 | ~~reavaliar PIB per capita negativo em 2021 (Guamaré/RN)~~ **CONFIRMADO: 5.302 linhas; 0 PIB negativo em 2021 (D17); 2.771 informantes de esgoto; 268 municípios fora do universo (3.304.102 hab); 5 atípicos = mart 5** — `test_m9_linhas_pk_colunas`, `test_m9_sem_pib_negativo_2021`, `test_m9_fora_do_universo`, `test_m9_investimento_atipico_igual_mart5` |
+| 10 | ~~distribuição exata dos quartis (empates no `ntile`)~~ **CONFIRMADO: 8 linhas (4×2); 1.118 municípios/quartil (4×1.118 = 4.472); painel − A2 = 4.431 = mart 4; cobertura painel 2010/2021 = 92,17/93,52%** — `test_m10_linhas_pk_colunas`, `test_m10_quartis_1118_e_cortes`, `test_m10_painel_sem_a2_igual_mart4` |
 
 ### Decisões que dependem de você
 

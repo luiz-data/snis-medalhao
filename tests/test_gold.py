@@ -316,14 +316,40 @@ def test_m1_pk_e_dimensoes(gold_db):
 
 
 def test_m1_informantes_agua_2021(gold_db):
+    """Conferência cruzada #7 (spec-gold §6): informantes de água do mart 1 em 2021
+    = municípios com água urbana informada na silver (consulta viva, não constante).
+
+    Informante = populacao_urbana_atendida_agua e populacao_urbana não nulos E não
+    excluído por A2 (num > den). A silver reconstrói o mesmo universo sem o mart.
+    """
     con = _ro(gold_db)
     try:
         total = con.execute(
             f"SELECT sum(municipios_informantes_agua) FROM {M1} WHERE ano = 2021"
         ).fetchone()[0]
+        com_info, informante_sem_a2, a2 = con.execute(
+            """
+            SELECT
+              count(*) FILTER (WHERE populacao_urbana_atendida_agua IS NOT NULL
+                                 AND populacao_urbana IS NOT NULL),
+              count(*) FILTER (WHERE populacao_urbana_atendida_agua IS NOT NULL
+                                 AND populacao_urbana IS NOT NULL
+                                 AND NOT (populacao_urbana_atendida_agua > populacao_urbana)),
+              count(*) FILTER (WHERE populacao_urbana_atendida_agua IS NOT NULL
+                                 AND populacao_urbana IS NOT NULL
+                                 AND populacao_urbana_atendida_agua > populacao_urbana)
+            FROM silver.municipio_agua_esgoto WHERE ano = 2021
+            """
+        ).fetchone()
     finally:
         con.close()
-    assert total == M1_INFORMANTES_AGUA_2021
+    # consulta viva na silver = informantes do mart (sem usar constante)
+    assert total == informante_sem_a2
+    # identidade: com informação − exclusões A2 = informantes
+    assert com_info - a2 == informante_sem_a2
+    # ancoragem adicional (valores documentados da Rodada 3.2 / D5)
+    assert com_info == 5_302
+    assert total == M1_INFORMANTES_AGUA_2021  # 5.284
 
 
 def test_m1_identidade_exclusao_a2(gold_db):
@@ -604,6 +630,64 @@ def test_m3_componentes_somam_inconsistentes(gold_db):
     finally:
         con.close()
     assert incoerentes == 0
+
+
+def test_m3_in049_inconsistentes_vs_silver(gold_db):
+    """Conferência cruzada #5 (spec-gold §6): exclusões IN049 reproduzidas direto na
+    silver, sem usar o mart, batem com as colunas do mart 3 em todos os anos.
+
+    Definição D3-revisado: AG006=produzido, AG018=importado(0), AG024=serviço(0),
+    AG010=consumido; den = AG006+AG018−AG024.
+      - componente (a) "consumo acima" (inconsistente estrita) = den>0 e AG010>den;
+      - componente (c) "den. não-positivo"                     = den<=0;
+      - total linhas_inconsistentes_in049                       = (a) OR (c).
+    A nota da spec "0–57/ano" refere-se à componente (a); o total (a)+(c) é 7–88.
+    """
+    con = _ro(gold_db)
+    try:
+        divergentes, total_silver, min_a, max_a = con.execute(
+            """
+            WITH b AS (
+              SELECT ano,
+                volume_agua_produzido AS ag006,
+                coalesce(volume_agua_tratada_importado, 0) AS ag018,
+                volume_agua_consumido AS ag010,
+                coalesce(volume_servico_agua, 0) AS ag024
+              FROM silver.municipio_agua_esgoto
+              WHERE ano BETWEEN 2010 AND 2021
+                AND volume_agua_produzido IS NOT NULL
+                AND volume_agua_consumido IS NOT NULL
+            ),
+            ind AS (
+              SELECT ano,
+                count(*) FILTER (WHERE (ag006+ag018-ag024)<=0
+                                    OR ag010>(ag006+ag018-ag024)) AS i_total,
+                count(*) FILTER (WHERE (ag006+ag018-ag024)<=0)    AS i_den,
+                count(*) FILTER (WHERE (ag006+ag018-ag024)>0
+                                   AND ag010>(ag006+ag018-ag024)) AS i_acima
+              FROM b GROUP BY ano
+            ),
+            mart AS (
+              SELECT ano,
+                sum(linhas_inconsistentes_in049) AS m_total,
+                sum(excluidas_den_nao_positivo)  AS m_den,
+                sum(excluidas_consumo_acima)     AS m_acima
+              FROM gold.perdas_consumo_uf_ano
+              WHERE ano BETWEEN 2010 AND 2021 GROUP BY ano
+            )
+            SELECT
+              count(*) FILTER (WHERE i_total<>m_total
+                                  OR i_den<>m_den
+                                  OR i_acima<>m_acima),
+              sum(i_total), min(i_acima), max(i_acima)
+            FROM ind JOIN mart USING (ano)
+            """
+        ).fetchone()
+    finally:
+        con.close()
+    assert divergentes == 0           # silver independente == mart, ano a ano
+    assert int(total_silver) == 480   # total de exclusões na janela 2010–2021
+    assert (int(min_a), int(max_a)) == (0, 57)  # componente (a) estrita = "0–57" da spec
 
 
 def test_m3_consumo_per_capita_nacional_2021(gold_db):
@@ -2365,3 +2449,48 @@ def test_m10_sql_sem_rascunho():
     ).read_text(encoding="utf-8")
     for marcador in ("TODO", "FIXME", "XXX", "rascunho", "placeholder"):
         assert marcador.lower() not in sql.lower()
+
+
+# ---------------------------------------------------------------------------
+# Conferências cruzadas diretas entre marts (seção 6 da spec-gold)
+# ---------------------------------------------------------------------------
+def test_cross_pop_faixa_igual_pop_uf_2021(gold_db):
+    """Σ pop_total_ibge por faixa (mart 6) = Σ pop_total_ibge por UF (mart 7) em 2021.
+
+    Os dois marts recortam o mesmo universo IBGE 2021 (213.317.639) por eixos
+    diferentes (porte vs. UF); a soma tem de coincidir exatamente.
+    """
+    con = _ro(gold_db)
+    try:
+        pop_faixa = con.execute(
+            f"SELECT sum(pop_total_ibge) FROM {M6} WHERE ano = 2021"
+        ).fetchone()[0]
+        pop_uf = con.execute(
+            f"SELECT sum(pop_total_ibge) FROM {M7} WHERE ano = 2021"
+        ).fetchone()[0]
+    finally:
+        con.close()
+    assert pop_faixa == pop_uf
+
+
+def test_cross_atipicos_m5_m8_m9_2021(gold_db):
+    """Atípicos de investimento idênticos nos marts 5, 8 e 9 em 2021 (D4/D28).
+
+    O mart 9 só existe em 2021; o predicado do atípico (R$ 1.000/hab) é o mesmo
+    nos três. Σmunicipios_investimento_atipico de 5 e 8 e a contagem de linhas
+    atípicas de 9 devem coincidir no ano 2021.
+    """
+    con = _ro(gold_db)
+    try:
+        m5 = con.execute(
+            f"SELECT sum(municipios_investimento_atipico) FROM {M5} WHERE ano = 2021"
+        ).fetchone()[0]
+        m8 = con.execute(
+            f"SELECT sum(municipios_investimento_atipico) FROM {M8} WHERE ano = 2021"
+        ).fetchone()[0]
+        m9 = con.execute(
+            f"SELECT count(*) FILTER (WHERE investimento_atipico) FROM {M9}"
+        ).fetchone()[0]
+    finally:
+        con.close()
+    assert int(m5) == int(m8) == int(m9)
