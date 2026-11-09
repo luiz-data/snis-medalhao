@@ -10,11 +10,17 @@ de Informações sobre Saneamento), tabela `municipio_agua_esgoto`, cobrindo
 |---|---|---|
 | **bronze** | ✅ feita | Espelho fiel do CSV — tudo como texto, sem transformações. |
 | **silver** | ✅ feita | Tipagem fiel da bronze e correção de um erro de digitação de coluna. |
-| **gold** | 🔜 próxima | Indicadores e agregações para análise. |
+| **gold** | ✅ feita | **10 marts** de indicadores e agregações para análise. |
 | **dashboard** | 🔜 próxima | Visualização em Streamlit. |
 
+O pipeline cruza o SNIS com o **IBGE** (DTB de municípios, estimativas de
+**população** 1991–2025 e **PIB** municipal 2010–2021, via API do SIDRA), usados
+como denominador de cobertura, recorte territorial (UF/região) e eixo de renda.
+
 Specs: [`docs/spec-ingestao.md`](docs/spec-ingestao.md) (bronze) ·
-[`docs/spec-transformacao.md`](docs/spec-transformacao.md) (silver).
+[`docs/spec-transformacao.md`](docs/spec-transformacao.md) (silver) ·
+[`docs/spec-ibge.md`](docs/spec-ibge.md) (IBGE) ·
+[`docs/spec-gold.md`](docs/spec-gold.md) (gold).
 
 ## A camada silver
 
@@ -36,6 +42,29 @@ bronze.
 
 Anomalias **não são corrigidas** na silver — isso é responsabilidade da gold.
 
+## A camada gold — os 10 marts
+
+Cada mart é um `SELECT` em `sql/gold/NN_nome.sql`; o executor
+([`pipeline/gold.py`](pipeline/gold.py)) compõe o `CREATE TABLE` e recria o schema
+`gold` do zero. Grão, fórmulas e decisões estão em
+[`docs/spec-gold.md`](docs/spec-gold.md) e [`docs/indicadores.md`](docs/indicadores.md).
+
+| # | Tabela (`gold.`) | Pergunta de negócio |
+|---|---|---|
+| 1 | `atendimento_uf_ano` | Qual % da população **urbana** tem água e esgoto, por UF e ano? |
+| 2 | `esgoto_coleta_tratamento_ano` | Quanto do esgoto é **coletado e tratado** no Brasil, ano a ano? |
+| 3 | `perdas_consumo_uf_ano` | Quanta água se **perde** na distribuição e quanto se **consome** por pessoa, por UF e ano? |
+| 4 | `ranking_atendimento_variacao` | Quais municípios mais **melhoraram/pioraram** no atendimento urbano de água entre 2010 e 2021? |
+| 5 | `financeiro_uf_ano` | Quanto se **investe e gasta** por UF e ano (tarifa, despesa unitária), em R$ nominais? |
+| 6 | `atendimento_porte_ano` | Como variam as coberturas de água e esgoto por **faixa de porte** do município? |
+| 7 | `populacao_sem_servico_uf_ano` | Quantos habitantes, em **números absolutos**, estão sem água e sem coleta de esgoto, por UF? |
+| 8 | `investimento_per_capita_uf_ano` | Quanto se **investe por habitante**, por UF e ano, em R$ nominais? |
+| 9 | `atendimento_vs_pib_2021` | Como cobertura, perdas e investimento se relacionam com o **PIB per capita** do município em 2021? |
+| 10 | `avanco_por_renda_painel` | O atendimento urbano de água **avançou mais** entre 2010 e 2021 em municípios de maior ou menor **renda**? |
+
+Contagens de todas as tabelas (bronze, silver, gold) e tempo de reconstrução em
+[`docs/contagens.md`](docs/contagens.md).
+
 ## Stack
 
 Python · [uv](https://docs.astral.sh/uv/) · DuckDB · Streamlit · pytest · ruff
@@ -53,10 +82,14 @@ Os dados **não ficam no repositório**. Para obtê-los:
 
 ```bash
 uv sync                        # instala dependências
-uv run python executar.py      # apaga o banco e roda a ingestão do zero
-uv run pytest -v               # testes
+uv run python executar.py      # apaga o banco e roda as 6 etapas do zero
+uv run pytest -v               # testes (bronze, silver, IBGE e gold)
 uv run ruff check .            # linter
 ```
+
+`executar.py` roda as **6 etapas** em ordem: bronze SNIS → silver SNIS → bronze
+IBGE → silver IBGE → cobertura SNIS×IBGE → gold (10 marts). Reconstrução completa
+em ~10 s (ver [`docs/contagens.md`](docs/contagens.md)).
 
 ## MCP (opcional)
 
@@ -72,27 +105,57 @@ claude mcp add --scope project duckdb -- uvx mcp-server-motherduck --db-path sni
 .
 ├── data/raw/                  # fonte (somente leitura, fora do repo)
 ├── docs/
-│   ├── contagens.md               # contagens de referência da fonte
+│   ├── contagens.md               # contagens da fonte e de todas as tabelas
+│   ├── decisoes.md                # decisões aprovadas (D1–D33)
+│   ├── indicadores.md             # fórmulas e grão dos 10 marts
+│   ├── fontes-ibge.md             # catálogo das fontes IBGE
 │   ├── investigacao-silver.md     # base dos números da silver
 │   ├── spec-ingestao.md           # spec da camada bronze
-│   └── spec-transformacao.md      # spec da camada silver
+│   ├── spec-transformacao.md      # spec da camada silver
+│   ├── spec-ibge.md               # spec da ingestão/silver do IBGE
+│   └── spec-gold.md               # spec da camada gold (10 marts)
 ├── pipeline/
 │   ├── db.py                  # caminhos e conexão com o banco
 │   ├── conferir.py            # validação rápida do CSV
-│   ├── ingestao.py            # ingestão da camada bronze
-│   └── transformacao.py       # transformação da camada silver
+│   ├── ingestao.py            # bronze SNIS
+│   ├── transformacao.py       # silver SNIS
+│   ├── ingestao_ibge.py       # bronze IBGE
+│   ├── transformacao_ibge.py  # silver IBGE
+│   ├── cobertura.py           # cobertura de junção SNIS × IBGE
+│   └── gold.py                # executor dos 10 marts
+├── sql/gold/                  # um SELECT por mart (NN_nome.sql)
 ├── tests/
 │   ├── test_bronze.py         # testes da bronze
-│   └── test_silver.py         # testes da silver
-├── executar.py                # orquestrador do pipeline
+│   ├── test_silver.py         # testes da silver
+│   ├── test_ibge_bronze.py    # testes da bronze IBGE
+│   ├── test_ibge_silver.py    # testes da silver IBGE
+│   └── test_gold.py           # testes dos 10 marts
+├── executar.py                # orquestrador do pipeline (6 etapas)
 └── pyproject.toml
 ```
 
 ## Limitações conhecidas
 
-- **Unidades** das medidas (volume, extensão, consumo elétrico) a confirmar no
-  dicionário do SNIS; a silver **não converte** unidade nenhuma.
-- **Valores monetários** são provavelmente **nominais** (reais da data da
-  coleta); não há deflação na silver.
-- `populacao_urbana_atendida_esgoto` é **100% nula em 2022** — mudança
-  metodológica da fonte ou falha de carga, não confirmado.
+Pendências que o **dashboard** precisa respeitar (inventário completo em
+[`docs/spec-gold.md`](docs/spec-gold.md) §8 e [`docs/decisoes.md`](docs/decisoes.md)):
+
+- **Esgoto urbano "entre informantes"** (marts 1 e 9): a cobertura urbana de
+  esgoto cobre só quem informa esgoto (≈72,5% em 2021), não o Brasil todo — viés
+  de seleção; distinta do IN056 por porte/UF (55,8%). Rotular como tal. Ver
+  [D32](docs/decisoes.md).
+- **Indicadores urbanos só até 2021:** a população urbana autodeclarada é **100%
+  nula em 2022**; os marts urbanos (1, 4, 9, 10) usam 2021 e nunca 2022. Ver
+  [D2](docs/decisoes.md).
+- **Alerta A2 (urbana atendida > urbana):** massivo **antes de 2010**, pequeno na
+  janela (41 casos 2010–2021, excluídos com flag). Não plotar cobertura urbana
+  antes de 2010. Ver [D5](docs/decisoes.md).
+- **Semântica fina de investimento/receita** (prestador vs. município vs. estado;
+  direta vs. indireta) nos marts 5 e 8 **a confirmar** no dicionário do SNIS; os
+  valores são **nominais** (sem deflação) e mantidos como vêm da fonte — ressalva
+  no painel. Ver [`docs/indicadores.md`](docs/indicadores.md).
+- **Esgoto importado/exportado (mart 2):** a definição oficial de "volume
+  disponibilizado" de esgoto está **a confirmar**; o índice pode passar de 100 por
+  importação/exportação. Ver [D23](docs/decisoes.md).
+
+A **silver não converte unidade nenhuma** nem corrige anomalias — isso é papel da
+gold (decisões D1–D33).

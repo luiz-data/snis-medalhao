@@ -105,9 +105,12 @@ IBGE abaixo usa um ID daquele catálogo**.
 - **Ano(s) de referência:** 1995–2022.
 - **Fontes:** SNIS; **IBGE-DTB** (UF e região).
 - **`municipios_informantes`:** municípios com volumes/população não nulos no ano.
-- **Ressalvas:** definição oficial de perdas (IN049, "volume disponibilizado" =
-  produzido + importado − exportado − serviço) a confirmar; ponderar por volume
-  e por população; nunca `avg(indice_*)`.
+- **Ressalvas:** ~~definição oficial de perdas (IN049, "volume disponibilizado")
+  a confirmar~~ **RESOLVIDO (D3):** `IN049 = (AG006+AG018−AG010−AG024)/(AG006+AG018−AG024)×100`
+  (produzido + importado − exportado − serviço), soma sobre soma, com exclusão de
+  linhas inconsistentes; ver `test_m3_in049_nacional` e
+  `test_m3_in049_inconsistentes_vs_silver`. Ponderar por volume e por população;
+  nunca `avg(indice_*)`.
 
 ### Mart 4 — `ranking_atendimento_variacao`
 
@@ -270,13 +273,20 @@ IBGE abaixo usa um ID daquele catálogo**.
 
 ## Ressalvas de catálogo e "a confirmar"
 
-- **Definições oficiais do SNIS** (IN005/IN006/IN022/IN023/IN049 etc.,
-  denominador de tarifa, composição de "volume disponibilizado", conversão de
-  unidade do per capita) — **a confirmar** no dicionário do SNIS.
+- **Definições oficiais do SNIS** — os pontos que travavam a gold estão
+  **RESOLVIDOS**:
+  - ~~IN049 / "volume disponibilizado"~~ → **D3** (fórmula completa; `test_m3_in049_nacional`).
+  - ~~denominador de tarifa~~ → **D22** (`receita_operacional_direta / (AG011+ES007)`,
+    R$/m³ com ÷1.000; `test_m5_tarifa_despesa_unitaria`).
+  - ~~IN022 e conversão de unidade do per capita~~ → **D25** (`(AG010−AG019)×1e6 /
+    (pop_med×365)`, L/hab·dia; `test_m3_consumo_per_capita_nacional_2021`).
+  - IN005/IN006/IN023 e demais índices publicados fora do escopo dos 10 marts
+    seguem **a confirmar** se forem usados no futuro.
 - **Semântica fina das colunas** de investimento (prestador vs. município vs.
-  estado) e de receita (direta vs. indireta) — **a confirmar**.
-- **Cobertura de junção SNIS×IBGE** será medida antes de qualquer join
-  (convenção do catálogo [`fontes-ibge.md`](fontes-ibge.md)).
+  estado) e de receita (direta vs. indireta) — **a confirmar** (marts 5 e 8; não
+  bloqueia — valores mantidos como vêm da fonte, ressalva no painel).
+- **Cobertura de junção SNIS×IBGE** — **medida (D7, 2026-11-08):** mínima de 100%
+  em 2010–2021; ver [`decisoes.md`](decisoes.md) D7.
 
 ---
 
