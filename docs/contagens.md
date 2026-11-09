@@ -41,7 +41,7 @@ Reconstrução do zero (`executar.py`): **2026-11-08**. Tempo total do pipeline:
 > excluída é **ano 2025, `id_municipio` nulo** (registro malformado), removida pela
 > regra **IA6** (**D13**; exclusão só vale fora da janela 2010–2021).
 
-## gold (10 marts)
+## gold (10 marts + mart de apoio do dashboard)
 
 | # | Tabela | Linhas | Colunas |
 |---|---|---:|---:|
@@ -55,3 +55,10 @@ Reconstrução do zero (`executar.py`): **2026-11-08**. Tempo total do pipeline:
 | 8 | `investimento_per_capita_uf_ano` | 324 | 12 |
 | 9 | `atendimento_vs_pib_2021` | 5.302 | 13 |
 | 10 | `avanco_por_renda_painel` | 8 | 6 |
+| 11 | `kpis_brasil` (apoio do dashboard, **D34**) | 12 | 15 |
+
+> `kpis_brasil` (mart 11): KPIs nacionais por ano (2010–2021) para os cartões e o
+> resumo do dashboard, reproduzindo a fórmula de cada mart de origem (sem cálculo
+> na tela). Reconstrução do zero em **2026-11-09**: `executar.py` recria todas as
+> tabelas e o **EXCEPT nos dois sentidos = 0/0 nas 11 tabelas gold** contra o
+> backup anterior.

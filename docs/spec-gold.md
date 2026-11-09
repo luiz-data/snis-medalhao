@@ -61,6 +61,7 @@ se converte unidade (a silver só tipa e espelha — ver
 | `08_investimento_per_capita_uf_ano.sql` | `gold.investimento_per_capita_uf_ano` | ano × UF | SNIS, IBGE-POP, IBGE-DTB |
 | `09_atendimento_vs_pib_2021.sql` | `gold.atendimento_vs_pib_2021` | município (2021) | SNIS, IBGE-PIB, IBGE-POP |
 | `10_avanco_por_renda_painel.sql` | `gold.avanco_por_renda_painel` | quartil × 2 anos | SNIS, IBGE-PIB, IBGE-POP |
+| `11_kpis_brasil.sql` | `gold.kpis_brasil` | ano (Brasil) | SNIS, IBGE-POP (**D34**, mart de apoio do dashboard — ver ficha abaixo) |
 
 > `sql/gold/00_teste.sql` (`SELECT 1 AS x`) existe **só** para validar o executor
 > e é **apagado** depois (seção 9.4). Ele não é um mart.
@@ -246,6 +247,14 @@ São os **dois valores máximos** de `volume_esgoto_coletado` (erro de escala/
 dígito no bruto, não esgoto importado — nenhuma cidade coleta 500–950× o que
 consome). **Preservados sem correção** (a silver espelha; o mart não altera
 dado) e **isolados por `serie_robusta = false`** (ambos < 2006).
+
+**Fato — `indice_coleta_esgoto` acima de 100% em 1998 e 1999 (sem causa
+atribuída):** por conta desses valores, o índice nacional de coleta é
+**1.578,4% em 1998** (233 informantes de coleta) e **1.609,2% em 1999** (247
+informantes) — os **únicos dois anos** com coleta > 100% na série; o tratamento
+nunca passa de 100% (máx. 97,7% em 1998). O dado é **mantido na gold** (série
+completa 1995–2022); o **dashboard** exibe só a janela robusta **≥ 2006**
+(**D40**), onde nenhum ponto passa de 100%.
 
 - **Aceite (confirmado no SELECT/MCP, 2026-11-08):** **28 linhas** (1995–2022) ×
   **13 colunas**; PK `(ano)` sem duplicatas; índices "de todos" não nulos (den >
@@ -798,6 +807,34 @@ futura, fora do escopo**. O mart mede só o atendimento **urbano de água**.
 
 ---
 
+### Mart 11 — `gold.kpis_brasil` (D34, para o dashboard)
+
+- **Pergunta:** quais são os **KPIs nacionais** de saneamento por ano, para os
+  cartões e o resumo executivo do painel — **sem cálculo na tela**?
+- **Grão:** uma linha = **(ano)**, Brasil. **Janela 2010–2021** (12 linhas).
+- **Chave primária:** `(ano)`. **Fontes:** silver SNIS + IBGE‑POP (reusa as
+  fórmulas dos marts 1, 2, 3, 5, 6, 7, 8).
+- **Princípio (D34):** **não redefine indicador nenhum** — cada coluna reproduz a
+  fórmula exata do mart de origem (soma‑sobre‑soma) e o valor nacional travado no
+  teste daquele mart. Arquivo `sql/gold/11_kpis_brasil.sql` traz **só o SELECT**
+  (D20); o executor compõe o `CREATE TABLE`.
+- **Colunas (15):** `ano, cobertura_urbana_agua_br, cobertura_agua_in055_br,
+  cobertura_esgoto_in056_br, indice_coleta_esgoto_br, indice_tratamento_esgoto_br,
+  perdas_in049_br, consumo_per_capita_br, pop_sem_agua_br, pop_sem_esgoto_br,
+  pct_sem_agua_br, pct_sem_esgoto_br, municipios_sem_info_agua_br,
+  investimento_total_br, investimento_per_capita_br`.
+- **Perdas por ano:** `perdas_in049_br[2021] = 36,86%` (IN049/D3; exclusões D3
+  imateriais: +0,0002 pp). O **37,42%** é o **agregado 2010–2021 (pooled)**, nunca
+  rotulado "oficial". **Valor publicado não confirmado** (fontes oficiais divergem
+  para 2021: MDR 39,3%, Min. Cidades 40,3%; 40,1% é de 2020) → não reconciliado e
+  **o painel não cita número publicado**.
+- **Valores monetários nominais** (regra 7e do dashboard; sem coluna de metadado).
+- **Aceite (confirmado no SELECT/MCP, 2026-11-09):** 12 linhas × 15 colunas; os
+  valores de 2021 reproduzem exatamente os marts 1/2/3/5/6/7/8 (ver §5, testes
+  `test_m11_*`).
+
+---
+
 ## 3. Glossário da gold (definições fechadas)
 
 Uma definição, uma fórmula e uma fonte por termo.
@@ -907,6 +944,14 @@ temporário** via `tmp_path_factory`, **monkeypatch de
 | `test_m8_flag_d4` | 8 | `municipios_investimento_atipico` nacional = 120 (D28); duas colunas diferem em RN |
 | `test_m9_2021_pib` | 9 | 5.302 linhas; PIB per capita negativo preservado, sem log (D17) |
 | `test_m10_painel_quartis` | 10 | 8 linhas (4×2); `Σmunicipios_painel`/ano = 4.472 |
+| `test_m11_linhas_pk_colunas` | 11 | 12 linhas (2010–2021) × 15 colunas; PK `ano` única |
+| `test_m11_valores_2021` | 11 | linha 2021 com cada KPI travado (água 93,33; IN055 84,20; IN056 55,81; coleta 56,02; tratamento 80,33; perdas 36,86; consumo 151,3; sem água 33.285.121; sem esgoto 92.879.110; 258 sem info; inv. R$ 15.297.535.452,19; per capita 75,82) |
+| `test_m11_perdas_por_ano_nao_e_pooled` | 11 | perdas 2021 = 36,86% ≠ pooled 2010–2021 = 37,42% (D3, reconstruído da silver) |
+| `test_m11_igualdade_mart2` | 11 | coleta/tratamento = mart 2 por ano (12 anos, bit a bit) |
+| `test_m11_igualdade_mart7` | 11 | sem água/esgoto e sem‑informação = Σ mart 7 por ano |
+| `test_m11_igualdade_mart5` | 11 | investimento total = Σ mart 5 por ano (DECIMAL exato) |
+| `test_m11_cross_2021_marts_origem` | 11 | 2021: água (mart 1), IN055/IN056 (mart 6), per capita (mart 8) |
+| `test_m11_sql_sem_rascunho` | 11 | SQL sem marcadores de rascunho |
 | `test_executor_uma_tabela_por_arquivo` | — | critério 4 do executor (seção 4.1) |
 | `test_executor_rollback_em_erro` | — | critério 3 do executor (cópia temporária) |
 

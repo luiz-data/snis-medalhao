@@ -685,9 +685,12 @@ def test_m3_in049_inconsistentes_vs_silver(gold_db):
         ).fetchone()
     finally:
         con.close()
-    assert divergentes == 0           # silver independente == mart, ano a ano
-    assert int(total_silver) == 480   # total de exclusões na janela 2010–2021
-    assert (int(min_a), int(max_a)) == (0, 57)  # componente (a) estrita = "0–57" da spec
+    assert divergentes == 0  # silver independente == mart, ano a ano
+    assert int(total_silver) == 480  # total de exclusões na janela 2010–2021
+    assert (int(min_a), int(max_a)) == (
+        0,
+        57,
+    )  # componente (a) estrita = "0–57" da spec
 
 
 def test_m3_consumo_per_capita_nacional_2021(gold_db):
@@ -2494,3 +2497,297 @@ def test_cross_atipicos_m5_m8_m9_2021(gold_db):
     finally:
         con.close()
     assert int(m5) == int(m8) == int(m9)
+
+
+# ===========================================================================
+# Mart 11 — gold.kpis_brasil (D34): KPIs NACIONAIS por ano para o dashboard.
+# Reusa a fórmula exata de cada mart de origem (soma-sobre-soma) e reproduz o
+# nacional travado no teste do mart de origem. Janela 2010-2021. PK: ano.
+# Valores confirmados via MCP somente leitura (2026-11-09).
+# ===========================================================================
+
+M11 = "gold.kpis_brasil"
+
+M11_LINHAS = 12  # 2010-2021
+M11_COLUNAS = 15  # sem valor_nominal (metadado; regra 7e do dashboard)
+# Valores de 2021 (cartões/resumo). Perdas POR ANO (não o pooled 2010-2021).
+M11_AGUA_URB_2021 = 93.33  # = mart 1 (D5)
+M11_IN055_2021 = 84.20  # = mart 6 (IN055)
+M11_IN056_2021 = 55.81  # = mart 6 (IN056)
+M11_COLETA_2021 = 56.02  # = mart 2
+M11_TRAT_2021 = 80.33  # = mart 2
+M11_PERDAS_2021 = 36.86  # mart 3 IN049, ANO 2021 (o 37,42% é o pooled 2010-2021)
+M11_PERDAS_POOLED = 37.42  # agregado 2010-2021 (test_m3_in049_nacional), NÃO um ano
+M11_CONSUMO_2021 = 151.3  # = mart 3 (IN022/D25)
+M11_SEM_AGUA_2021 = 33_285_121  # = mart 7
+M11_SEM_ESGOTO_2021 = 92_879_110  # = mart 7
+M11_PCT_SEM_AGUA_2021 = 15.84  # = mart 7
+M11_PCT_SEM_ESGOTO_2021 = 44.19  # = mart 7
+M11_MUN_SEM_INFO_2021 = 258  # = mart 7 (municipios com pop IBGE e água nula/ausente)
+M11_INV_PC_2021 = 75.82  # = mart 8 (D31)
+# Investimento total 2021 (DECIMAL) — comparação exata, sem approx em dinheiro.
+M11_INV_TOTAL_2021 = "15297535452.19"
+
+
+def test_m11_linhas_pk_colunas(gold_db):
+    con = _ro(gold_db)
+    try:
+        linhas = con.execute(f"SELECT count(*) FROM {M11}").fetchone()[0]
+        colunas = con.execute(
+            "SELECT count(*) FROM duckdb_columns() "
+            "WHERE schema_name = 'gold' AND table_name = 'kpis_brasil'"
+        ).fetchone()[0]
+        dup = con.execute(
+            f"SELECT count(*) FROM (SELECT 1 FROM {M11} GROUP BY ano HAVING count(*) > 1)"
+        ).fetchone()[0]
+        anos = con.execute(f"SELECT min(ano), max(ano) FROM {M11}").fetchone()
+    finally:
+        con.close()
+    assert linhas == M11_LINHAS
+    assert colunas == M11_COLUNAS
+    assert dup == 0
+    assert anos == (2010, 2021)
+
+
+def test_m11_valores_2021(gold_db):
+    """Linha de 2021: cada KPI com o valor travado (cartões/resumo do dashboard)."""
+    con = _ro(gold_db)
+    try:
+        row = con.execute(
+            f"""
+            SELECT round(cobertura_urbana_agua_br, 2), round(cobertura_agua_in055_br, 2),
+                   round(cobertura_esgoto_in056_br, 2), round(indice_coleta_esgoto_br, 2),
+                   round(indice_tratamento_esgoto_br, 2), round(perdas_in049_br, 2),
+                   round(consumo_per_capita_br, 1), pop_sem_agua_br, pop_sem_esgoto_br,
+                   round(pct_sem_agua_br, 2), round(pct_sem_esgoto_br, 2),
+                   municipios_sem_info_agua_br, investimento_per_capita_br,
+                   CAST(investimento_total_br AS VARCHAR)
+            FROM {M11} WHERE ano = 2021
+            """
+        ).fetchone()
+    finally:
+        con.close()
+    assert row[0] == M11_AGUA_URB_2021
+    assert row[1] == M11_IN055_2021
+    assert row[2] == M11_IN056_2021
+    assert row[3] == M11_COLETA_2021
+    assert row[4] == M11_TRAT_2021
+    assert row[5] == M11_PERDAS_2021
+    assert row[6] == M11_CONSUMO_2021
+    assert int(row[7]) == M11_SEM_AGUA_2021
+    assert int(row[8]) == M11_SEM_ESGOTO_2021
+    assert row[9] == M11_PCT_SEM_AGUA_2021
+    assert row[10] == M11_PCT_SEM_ESGOTO_2021
+    assert int(row[11]) == M11_MUN_SEM_INFO_2021
+    assert round(float(row[12]), 2) == M11_INV_PC_2021
+    assert row[13] == M11_INV_TOTAL_2021  # dinheiro: igualdade exata (sem approx)
+
+
+def test_m11_perdas_por_ano_nao_e_pooled(gold_db):
+    """perdas_in049_br[2021] = 36,86% (ano) e difere do pooled 2010-2021 = 37,42%.
+
+    O pooled é reconstruído da silver (mesma fórmula D3, todos os anos juntos) e
+    bate com test_m3_in049_nacional; prova que o KPI de ano NÃO é o pooled.
+    """
+    con = _ro(gold_db)
+    try:
+        ano_2021 = con.execute(
+            f"SELECT round(perdas_in049_br, 2) FROM {M11} WHERE ano = 2021"
+        ).fetchone()[0]
+        pooled = con.execute(
+            """
+            SELECT round(100.0 * sum(num) FILTER (num >= 0 AND den > 0)
+                   / nullif(sum(den) FILTER (num >= 0 AND den > 0), 0), 2)
+            FROM (
+                SELECT volume_agua_produzido + coalesce(volume_agua_tratada_importado, 0)
+                         - coalesce(volume_servico_agua, 0) AS den,
+                       volume_agua_produzido + coalesce(volume_agua_tratada_importado, 0)
+                         - volume_agua_consumido - coalesce(volume_servico_agua, 0) AS num
+                FROM silver.municipio_agua_esgoto
+                WHERE ano BETWEEN 2010 AND 2021
+                  AND volume_agua_produzido IS NOT NULL
+                  AND volume_agua_consumido IS NOT NULL
+            ) t
+            """
+        ).fetchone()[0]
+    finally:
+        con.close()
+    assert ano_2021 == M11_PERDAS_2021
+    assert pooled == M11_PERDAS_POOLED
+    assert ano_2021 != pooled
+
+
+def test_m11_igualdade_mart2(gold_db):
+    """Coleta/tratamento do mart 11 = mart 2 por ano (2010-2021), bit a bit."""
+    con = _ro(gold_db)
+    try:
+        divergentes = con.execute(
+            f"""
+            SELECT count(*)
+            FROM {M11} k JOIN {M2} m USING (ano)
+            WHERE m.ano BETWEEN 2010 AND 2021
+              AND (abs(k.indice_coleta_esgoto_br - m.indice_coleta_esgoto) > 1e-9
+                OR abs(k.indice_tratamento_esgoto_br - m.indice_tratamento_esgoto) > 1e-9)
+            """
+        ).fetchone()[0]
+        pares = con.execute(
+            f"SELECT count(*) FROM {M11} k JOIN {M2} m USING (ano) "
+            "WHERE m.ano BETWEEN 2010 AND 2021"
+        ).fetchone()[0]
+    finally:
+        con.close()
+    assert divergentes == 0
+    assert pares == 12
+
+
+def test_m11_igualdade_mart7(gold_db):
+    """Sem água/esgoto e sem-informação do mart 11 = Σ mart 7 por ano."""
+    con = _ro(gold_db)
+    try:
+        divergentes = con.execute(
+            f"""
+            SELECT count(*)
+            FROM {M11} k
+            JOIN (
+                SELECT ano, sum(pop_sem_agua) sa, sum(pop_sem_esgoto) se,
+                       sum(municipios_sem_informacao_agua) mi
+                FROM {M7} GROUP BY ano
+            ) m USING (ano)
+            WHERE k.pop_sem_agua_br <> m.sa
+               OR k.pop_sem_esgoto_br <> m.se
+               OR k.municipios_sem_info_agua_br <> m.mi
+            """
+        ).fetchone()[0]
+    finally:
+        con.close()
+    assert divergentes == 0
+
+
+def test_m11_igualdade_mart5(gold_db):
+    """Investimento total do mart 11 = Σ mart 5 por ano (DECIMAL exato)."""
+    con = _ro(gold_db)
+    try:
+        divergentes = con.execute(
+            f"""
+            SELECT count(*)
+            FROM {M11} k
+            JOIN (SELECT ano, sum(investimento_total) it FROM {M5}
+                  WHERE ano BETWEEN 2010 AND 2021 GROUP BY ano) m USING (ano)
+            WHERE k.investimento_total_br IS DISTINCT FROM m.it
+            """
+        ).fetchone()[0]
+    finally:
+        con.close()
+    assert divergentes == 0
+
+
+def test_m11_cross_2021_marts_origem(gold_db):
+    """2021: KPIs do mart 11 batem com os nacionais travados dos marts 1/6/8."""
+    con = _ro(gold_db)
+    try:
+        row = con.execute(
+            f"""
+            SELECT round(cobertura_urbana_agua_br, 2), round(cobertura_agua_in055_br, 2),
+                   round(cobertura_esgoto_in056_br, 2), round(investimento_per_capita_br, 2)
+            FROM {M11} WHERE ano = 2021
+            """
+        ).fetchone()
+    finally:
+        con.close()
+    assert M1_COB_AGUA_BR_2021_MIN <= row[0] <= M1_COB_AGUA_BR_2021_MAX  # mart 1
+    assert row[1] == M6_AGUA_NAC_2021  # mart 6 IN055
+    assert row[2] == M6_ESGOTO_NAC_2021  # mart 6 IN056
+    assert row[3] == M8_PC_COM[2021]  # mart 8 (D31)
+
+
+def test_m11_sql_sem_rascunho():
+    """O SQL do mart 11 não traz marcadores de rascunho."""
+    import pathlib
+
+    sql = (
+        pathlib.Path(gold_mod.__file__).resolve().parent.parent
+        / "sql"
+        / "gold"
+        / "11_kpis_brasil.sql"
+    ).read_text(encoding="utf-8")
+    for marcador in ("TODO", "FIXME", "XXX", "rascunho", "placeholder"):
+        assert marcador.lower() not in sql.lower()
+
+
+# ===========================================================================
+# Conferências C9 e C10 do dashboard (spec-gold §6, spec-dashboard §8).
+# ===========================================================================
+
+
+def test_c9_regiao_soma_brasil(gold_db):
+    """C9: Σ regiões = Brasil (mart 11) para déficit de esgoto e investimento, 2021."""
+    con = _ro(gold_db)
+    try:
+        soma_def = con.execute(
+            "SELECT sum(pop_sem_esgoto) FROM gold.populacao_sem_servico_uf_ano "
+            "WHERE ano = 2021"
+        ).fetchone()[0]
+        br_def = con.execute(
+            "SELECT pop_sem_esgoto_br FROM gold.kpis_brasil WHERE ano = 2021"
+        ).fetchone()[0]
+        soma_inv = con.execute(
+            "SELECT sum(investimento_total) FROM gold.financeiro_uf_ano "
+            "WHERE ano = 2021"
+        ).fetchone()[0]
+        br_inv = con.execute(
+            "SELECT investimento_total_br FROM gold.kpis_brasil WHERE ano = 2021"
+        ).fetchone()[0]
+    finally:
+        con.close()
+    assert int(soma_def) == int(br_def)
+    assert soma_inv == br_inv
+
+
+def test_c9_cobertura_ponderada_regiao(gold_db):
+    """C9 (spec-gold §6): a cobertura urbana de água PONDERADA por região
+    (soma/soma dos numeradores e denominadores das 5 regiões) = agregado Brasil
+    do mart 11. Reconstruída da silver (A2 excluída, 2021)."""
+    con = _ro(gold_db)
+    try:
+        n_reg, ponderada = con.execute(
+            """
+            WITH r AS (
+                SELECT d.nome_regiao,
+                    sum(s.populacao_urbana_atendida_agua) num,
+                    sum(s.populacao_urbana) den
+                FROM silver.municipio_agua_esgoto s
+                JOIN silver.ibge_dtb_municipio d ON d.id_municipio = s.id_municipio
+                WHERE s.ano = 2021
+                    AND s.populacao_urbana IS NOT NULL
+                    AND s.populacao_urbana_atendida_agua IS NOT NULL
+                    AND s.populacao_urbana_atendida_agua <= s.populacao_urbana
+                GROUP BY d.nome_regiao
+            )
+            SELECT count(*), round(100.0 * sum(num) / sum(den), 2) FROM r
+            """
+        ).fetchone()
+        brasil = con.execute(
+            "SELECT round(cobertura_urbana_agua_br, 2) FROM gold.kpis_brasil "
+            "WHERE ano = 2021"
+        ).fetchone()[0]
+    finally:
+        con.close()
+    assert n_reg == 5
+    assert ponderada == brasil
+
+
+def test_c10_anos_consistentes(gold_db):
+    """C10: perdas (mart 3) e financeiro (mart 5) cobrem os mesmos anos (2010–2021)."""
+    con = _ro(gold_db)
+    try:
+        anos_perdas = con.execute(
+            "SELECT count(DISTINCT ano) FROM gold.perdas_consumo_uf_ano "
+            "WHERE ano BETWEEN 2010 AND 2021 AND indice_perdas_in049 IS NOT NULL"
+        ).fetchone()[0]
+        anos_fin = con.execute(
+            "SELECT count(DISTINCT ano) FROM gold.financeiro_uf_ano "
+            "WHERE ano BETWEEN 2010 AND 2021 AND investimento_total IS NOT NULL"
+        ).fetchone()[0]
+    finally:
+        con.close()
+    assert anos_perdas == anos_fin == 12
