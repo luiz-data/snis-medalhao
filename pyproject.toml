@@ -3,6 +3,7 @@ name = "snis"
 version = "0.1.0"
 requires-python = ">=3.10"
 dependencies = [
+    "altair>=6.2.2",
     "duckdb>=1.5.6",
     "pandas>=2.3.3",
     "streamlit>=1.65.0",
@@ -11,6 +12,7 @@ dependencies = [
 [dependency-groups]
 dev = [
     "pytest>=9.2.0",
+    "pytest-cov>=7.1.0",
     "ruff>=0.17.3",
 ]
 

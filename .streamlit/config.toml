@@ -1,0 +1,9 @@
+# Tema escuro verde-azulado (D37). Espelha tema.py (FONTE ÚNICA da paleta).
+# Se mudar aqui, mude em tema.py (PALETA) — e vice-versa.
+[theme]
+base = "dark"
+primaryColor = "#45D0BB"            # teal (acento)
+backgroundColor = "#0B1F24"         # bg
+secondaryBackgroundColor = "#123A42"  # surface
+textColor = "#EAF4F1"               # text
+font = "sans serif"
