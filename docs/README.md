@@ -9,7 +9,8 @@ conferências).
 1. [`spec-ingestao.md`](spec-ingestao.md) — spec da camada **bronze** (SNIS): espelho fiel do CSV.
 2. [`spec-transformacao.md`](spec-transformacao.md) — spec da camada **silver** (SNIS): tipagem fiel, regras bloqueantes e alertas.
 3. [`spec-ibge.md`](spec-ibge.md) — spec da ingestão e silver do **IBGE** (DTB, população, PIB).
-4. [`fontes-ibge.md`](fontes-ibge.md) — catálogo obrigatório das fontes IBGE: IDs, URLs, chaves e limitações.
+4. [`fontes-snis.md`](fontes-snis.md) — catálogo da fonte base **SNIS** (Base dos Dados): URL, identificadores, hash, contagens e como reproduzir a obtenção.
+5. [`fontes-ibge.md`](fontes-ibge.md) — catálogo obrigatório das fontes IBGE: IDs, URLs, chaves e limitações.
 5. [`spec-gold.md`](spec-gold.md) — spec da camada **gold** (11 marts), grão, fórmulas e limitações conhecidas (§8).
 6. [`indicadores.md`](indicadores.md) — fichas dos indicadores: fórmula e grão de cada mart.
 7. [`spec-dashboard.md`](spec-dashboard.md) — spec do **dashboard** Streamlit sobre a gold.

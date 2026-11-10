@@ -6,9 +6,10 @@
 | **Fonte** | `data/raw/br_mdr_snis_municipio_agua_esgoto.csv.gz` (somente leitura) |
 | **Destino** | banco `snis.duckdb` · schema `bronze` · tabela `municipio_agua_esgoto` |
 
-> **Referências:** contagens em [`docs/contagens.md`](contagens.md)
-> (119.256 linhas, 133 colunas); leitura de referência já existente em
-> [`pipeline/conferir.py`](../pipeline/conferir.py).
+> **Referências:** fonte, identificadores, hash e obtenção em
+> [`docs/fontes-snis.md`](fontes-snis.md); contagens em
+> [`docs/contagens.md`](contagens.md) (119.256 linhas, 133 colunas); leitura de
+> referência já existente em [`pipeline/conferir.py`](../pipeline/conferir.py).
 
 ---
 

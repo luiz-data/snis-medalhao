@@ -92,6 +92,7 @@ Testes e linter: `uv run pytest -v` · `uv run ruff check .`
 - [`docs/spec-gold.md`](docs/spec-gold.md) — gold (11 marts) e limitações §8.
 - [`docs/spec-dashboard.md`](docs/spec-dashboard.md) — dashboard.
 - [`docs/decisoes.md`](docs/decisoes.md) — decisões aprovadas (D1–D40).
+- [`docs/fontes-snis.md`](docs/fontes-snis.md) — catálogo da fonte base SNIS.
 - [`docs/fontes-ibge.md`](docs/fontes-ibge.md) — catálogo das fontes IBGE.
 - [`docs/indicadores.md`](docs/indicadores.md) — fórmulas e grão dos marts.
 
@@ -156,10 +157,17 @@ referência é **2026-11-08** (o pipeline procura as fontes IBGE em
 
 ### 1. SNIS — `municipio_agua_esgoto`
 
-- **Fonte:** [Base dos Dados](https://basedosdados.org/) — tabela
-  `br_mdr_snis.municipio_agua_esgoto`.
+- **Fonte:** Base dos Dados — conjunto SNIS, tabela `municipio_agua_esgoto`
+  ([página da tabela](https://basedosdados.org/dataset/2a543ad8-3cdb-4047-9498-efe7fb8ed697?table=df7cf198-4889-4baf-bb77-4e0e28eb90ca)).
+  Origem primária: Ministério do Desenvolvimento Regional (MDR). Cobertura
+  **1995–2022** (119.256 registros, 133 colunas, 27 UFs, 5.549 municípios).
+- **Obtenção:** download pela página, exportação pelo console do BigQuery ou
+  pacote Python `basedosdados` (BigQuery exige conta Google e projeto de
+  faturamento). Passos, identificadores e itens "a confirmar" em
+  [`docs/fontes-snis.md`](docs/fontes-snis.md).
 - **Destino:** `data/raw/br_mdr_snis_municipio_agua_esgoto.csv.gz`
-  (**não descompacte**).
+  (**não descompacte**). sha256 e contagens em
+  [`docs/fontes-snis.md`](docs/fontes-snis.md).
 
 ### 2. IBGE-POP — População residente municipal
 
@@ -214,11 +222,12 @@ repositório cobre **o código, não os dados** — cada fonte tem seus próprio
 
 | Fonte | Usada para | Termos (verificado em 2026-11-09) |
 |---|---|---|
-| **SNIS** (Ministério das Cidades / MDR) | tabela base `municipio_agua_esgoto` | Página do SNIS em [gov.br/mdr](https://www.gov.br/mdr/pt-br/assuntos/saneamento/snis): conteúdo restrito/autenticação na coleta; não encontramos termos de reúso específicos para os microdados do SNIS. **Consulte os termos da fonte.** |
+| **SNIS** (Ministério do Desenvolvimento Regional / MDR), via [Base dos Dados](https://basedosdados.org/dataset/2a543ad8-3cdb-4047-9498-efe7fb8ed697?table=df7cf198-4889-4baf-bb77-4e0e28eb90ca) | tabela base `municipio_agua_esgoto` (catálogo em [`docs/fontes-snis.md`](docs/fontes-snis.md)) | A página da Base dos Dados **não informa licença** e só exibe links "Termos de uso"/"Política de privacidade", sem o texto; a página do SNIS em [gov.br/mdr](https://www.gov.br/mdr/pt-br/assuntos/saneamento/snis) teve conteúdo restrito/autenticação na coleta. **Consulte os termos da fonte.** |
 | **Base dos Dados** | distribuição do SNIS e da população IBGE | [basedosdados.org/terms](https://basedosdados.org/terms): os termos tratam da assinatura/serviço; sobre os dados dizem que *"todos os direitos de propriedade intelectual relacionados aos dados fornecidos são de propriedade de terceiros"* e estão *"sujeitos às suas respectivas políticas de uso"*. **Consulte os termos da fonte e da fonte original.** |
 | **IBGE** (DTB, População, PIB/SIDRA) | território, denominador de cobertura, PIB | [Política de dados abertos do IBGE](https://www.ibge.gov.br/acesso-informacao/institucional/politica-de-dados-abertos.html): a página **retornou HTTP 403** na coleta automatizada, então **não citamos seu conteúdo**. **Consulte os termos da fonte.** |
 
-Catálogo detalhado das fontes IBGE (IDs, URLs, chaves, limitações) em
+Catálogo detalhado da fonte SNIS em [`docs/fontes-snis.md`](docs/fontes-snis.md)
+e das fontes IBGE (IDs, URLs, chaves, limitações) em
 [`docs/fontes-ibge.md`](docs/fontes-ibge.md).
 
 ## Stack
