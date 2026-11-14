@@ -376,6 +376,38 @@ preservado numa coluna separada `posicao_empate` (referência: D26 em
 O registro completo de **todas** as decisões — não só as correções — está em
 [`docs/decisoes.md`](docs/decisoes.md) (D1–D40).
 
+## Revisão de código
+
+Os dois itens abaixo não são erros de dado nem de lógica: vieram de **revisão
+externa do código**, que apontou problemas de legibilidade e manutenibilidade que
+os testes não pegam. É o que os separa da seção de erros acima, cujos achados são
+internos — descobertos por teste e verificação cruzada contra a fonte.
+
+**Quebra das funções longas da silver IBGE** — O que motivou: revisão externa
+apontou que `silver_populacao` e `silver_pib` concentravam coleta SQL, regras de
+qualidade, logging e gravação numa função só. O que mudou: as duas passaram de
+**104 e 105 linhas para 19 linhas** cada, como orquestradoras, com **22 funções
+extraídas** em `pipeline/transformacao_ibge.py` — 6 delas puras (`msg_*`, sem banco
+e sem logging). Nenhuma regra, valor de corte ou ordem de aplicação foi alterada.
+Verificação: **183 → 189 testes** (6 novos, cobrindo as regras IA9/IB9 e o caminho
+de falha da gravação), nenhum teste antigo mudou de resultado, cobertura do módulo
+de **85% → 89%**; pipeline reexecutado do zero com linhas, tipos e valores
+idênticos. (commit: `a25239e`)
+
+**Troca de `print()` por `logging`** — O que motivou: revisão externa apontou que o
+pipeline comunicava tudo por `print()`, sem nível de severidade e sem configuração
+central. O que mudou: dos **67 `print()`** existentes, **49 foram migrados** para
+logging — **44 chamadas: 10 ERROR** (antes de `sys.exit(1)`), **14 WARNING**
+(alertas de qualidade que não interrompem o pipeline) e **20 INFO** (progresso) —
+com configuração central em `pipeline/log.py`. Os **18 restantes** ficaram como
+`print()`: 16 em `pipeline/conferir.py` e 2 em `tema.py`, scripts de relatório fora
+do fluxo do pipeline (não chamados por `executar.py`), cujo valor é a saída
+formatada em stdout. Verificação: **189 testes passando**, `ruff check` e
+`format --check` sem pendências, pipeline reexecutado do zero. (commit: `6ad026e`)
+
+Detalhe das decisões de projeto correlatas em
+[`docs/decisoes.md`](docs/decisoes.md).
+
 ## Limitações conhecidas
 
 Pendências que o **dashboard** precisa respeitar (inventário completo em
