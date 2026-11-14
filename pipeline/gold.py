@@ -14,6 +14,7 @@ depois. Com sql/gold/ vazia, o executor ainda recria o schema `gold` (idempotên
 e cria 0 tabelas, saindo com 0 — é o estado esperado antes dos marts.
 """
 
+import logging
 import re
 import sys
 from pathlib import Path
@@ -21,6 +22,9 @@ from pathlib import Path
 import duckdb
 
 from pipeline.db import conectar
+from pipeline.log import configurar
+
+logger = logging.getLogger(__name__)
 
 # Pasta dos SQL da gold (spec-gold.md §1.1). Criada no repositório.
 RAIZ = Path(__file__).resolve().parent.parent
@@ -37,12 +41,12 @@ RE_DDL_DML = re.compile(
 
 
 def erro(con, msg):
-    """ROLLBACK defensivo, imprime e sai com 1 (igual à silver do SNIS/IBGE)."""
+    """ROLLBACK defensivo, loga e sai com 1 (igual à silver do SNIS/IBGE)."""
     try:
         con.execute("ROLLBACK")
     except duckdb.Error:
         pass
-    print(msg)
+    logger.error(msg)
     con.close()
     sys.exit(1)
 
@@ -100,7 +104,7 @@ def executar_gold(con):
     if not arquivos:
         # Estado esperado antes dos marts: schema recriado, 0 tabelas.
         con.execute("COMMIT")
-        print("gold: schema recriado, nenhum mart em sql/gold/ (0 tabelas).")
+        logger.info("gold: schema recriado, nenhum mart em sql/gold/ (0 tabelas).")
         return
 
     def n_tabelas():
@@ -155,20 +159,21 @@ def executar_gold(con):
     con.execute("COMMIT")
 
     for nome, linhas, colunas in resultados:
-        print(f"gold.{nome} · {linhas} linhas · {colunas} colunas")
+        logger.info(f"gold.{nome} · {linhas} linhas · {colunas} colunas")
 
     # Bloco de diagnóstico (spec-gold.md §4, item 5). Vazio até os marts
     # existirem — municípios fora de painel (4/10), sinalizados D4,
     # inconsistentes D3 virão com cada mart.
-    print("  diagnóstico: (sem marts; nada a reportar)")
+    logger.info("  diagnóstico: (sem marts; nada a reportar)")
 
 
 def main():
-    print("gold:")
+    logger.info("gold:")
     con = conectar()
     executar_gold(con)
     con.close()
 
 
 if __name__ == "__main__":
+    configurar()
     main()

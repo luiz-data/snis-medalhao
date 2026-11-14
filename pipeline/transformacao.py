@@ -33,11 +33,15 @@ Porquê das regras (resumo da spec):
   nenhuma tabela parcial fica no banco.
 """
 
+import logging
 import sys
 
 import duckdb
 
 from pipeline.db import conectar
+from pipeline.log import configurar
+
+logger = logging.getLogger(__name__)
 
 BRONZE = "bronze.municipio_agua_esgoto"
 SILVER = "silver.municipio_agua_esgoto"
@@ -253,12 +257,12 @@ def q(nome):
 
 
 def erro(con, msg):
-    """ROLLBACK defensivo (se houver transação aberta), imprime e sai com 1."""
+    """ROLLBACK defensivo (se houver transação aberta), loga e sai com 1."""
     try:
         con.execute("ROLLBACK")
     except duckdb.Error:
         pass  # nenhuma transação aberta ainda — tudo bem.
-    print(msg)
+    logger.error(msg)
     con.close()
     sys.exit(1)
 
@@ -459,7 +463,7 @@ def imprimir_saida(con):
     entrada = con.execute(f"SELECT count(*) FROM {BRONZE}").fetchone()[0]
     saida, nulas = total_celulas_nulas(con, silver_cols)
 
-    print(
+    logger.info(
         f"{SILVER} · entrada {fmt(entrada)} · saída {fmt(saida)} · "
         f"{fmt(len(silver_cols))} colunas · {fmt(nulas)} células nulas "
         "(referência da carga atual)"
@@ -485,17 +489,17 @@ def imprimir_saida(con):
         """
     ).fetchone()[0]
 
-    print("\nAlertas:")
-    print(
+    logger.warning("Alertas:")
+    logger.warning(
         f"- negativos: {fmt(len(with_neg))} colunas "
         f"(despesa* {fmt(por_pref['despesa'])} · "
         f"indice_* {fmt(por_pref['indice'])} · "
         f"volume {fmt(por_pref['volume'])} · ...)"
     )
-    print(f"- populacao_atendida_agua > populacao_urbana: {fmt(a2)} linhas")
-    print(f"- indice_* acima de 100: {fmt(a3_cols)} colunas")
+    logger.warning(f"- populacao_atendida_agua > populacao_urbana: {fmt(a2)} linhas")
+    logger.warning(f"- indice_* acima de 100: {fmt(a3_cols)} colunas")
     nulo_total = "sim" if (tot_2022 and nulos_2022 == tot_2022) else "não"
-    print(
+    logger.warning(
         f"- populacao_urbana_atendida_esgoto 100% nula em 2022: {nulo_total} "
         f"({fmt(nulos_2022)}/{fmt(tot_2022)})"
     )
@@ -571,12 +575,13 @@ def main():
     # Saída na tela (sobre a tabela já commitada).
     imprimir_saida(con)
 
-    print("\nAssumido fora da spec:")
+    logger.info("Assumido fora da spec:")
     for a in ASSUNCOES:
-        print(f"- {a}")
+        logger.info(f"- {a}")
 
     con.close()
 
 
 if __name__ == "__main__":
+    configurar()
     main()

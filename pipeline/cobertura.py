@@ -10,10 +10,14 @@ após a 1ª medição real e registrar o definitivo em docs/decisoes.md). Nada d
 número mágico espalhado pelo código.
 """
 
+import logging
 import sys
 
 from pipeline.db import conectar
 from pipeline.ibge import JANELA_FIM, JANELA_INICIO
+from pipeline.log import configurar
+
+logger = logging.getLogger(__name__)
 
 # --- Limiares de aceite (constantes nomeadas) -------------------------------
 # D7 (spec-ibge.md §7.3), PROVISÓRIOS — revisar após a 1ª medição real.
@@ -44,7 +48,7 @@ def cobertura_dtb(con):
     )
     bloqueia = div > DTB_MAX_DIVERGENCIAS
     status = "BLOQUEANTE" if bloqueia else "ok"
-    print(
+    logger.warning(
         f"  DTB: {div} id(s) do SNIS sem par na DTB "
         f"(limite {DTB_MAX_DIVERGENCIAS}, D12) — {status}"
     )
@@ -85,18 +89,18 @@ def cobertura_por_ano(con, fonte, tabela):
             piores.append((ano, taxa, "alerta"))
     taxas = [casados / n if n else 1.0 for _, n, casados in linhas]
     minimo = min(taxas) if taxas else 1.0
-    print(
+    logger.info(
         f"  {fonte}: cobertura por ano {JANELA_INICIO}–{JANELA_FIM} — "
         f"mínimo {minimo:.2%} "
         f"(alerta <{COBERTURA_ALERTA:.0%}, bloqueio <{COBERTURA_BLOQUEIO:.0%})"
     )
     for ano, taxa, nivel in piores:
-        print(f"    {ano}: {taxa:.2%} [{nivel}]")
+        logger.warning(f"    {ano}: {taxa:.2%} [{nivel}]")
     return bloqueia
 
 
 def main():
-    print("Cobertura de junção SNIS × IBGE (spec-ibge.md §7):")
+    logger.info("Cobertura de junção SNIS × IBGE (spec-ibge.md §7):")
     con = conectar()
     try:
         _, dtb_bloqueia = cobertura_dtb(con)
@@ -106,10 +110,11 @@ def main():
         con.close()
 
     if dtb_bloqueia or pop_bloqueia or pib_bloqueia:
-        print("[BLOQUEANTE] Cobertura abaixo do limiar de aceite (D7/D12).")
+        logger.error("[BLOQUEANTE] Cobertura abaixo do limiar de aceite (D7/D12).")
         sys.exit(1)
-    print("Cobertura dentro dos limiares (D7/D12).")
+    logger.info("Cobertura dentro dos limiares (D7/D12).")
 
 
 if __name__ == "__main__":
+    configurar()
     main()

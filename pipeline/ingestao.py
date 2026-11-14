@@ -1,6 +1,10 @@
+import logging
 import sys
 
 from pipeline.db import PASTA_RAW, conectar
+from pipeline.log import configurar
+
+logger = logging.getLogger(__name__)
 
 ARQUIVO = PASTA_RAW / "br_mdr_snis_municipio_agua_esgoto.csv.gz"
 TABELA = "bronze.municipio_agua_esgoto"
@@ -8,7 +12,7 @@ TABELA = "bronze.municipio_agua_esgoto"
 
 def main():
     if not ARQUIVO.exists():
-        print(f"Arquivo não encontrado: {ARQUIVO}")
+        logger.error(f"Arquivo não encontrado: {ARQUIVO}")
         sys.exit(1)
 
     fonte = (
@@ -30,14 +34,14 @@ def main():
 
         if linhas_tabela != linhas_fonte:
             con.execute("ROLLBACK")
-            print(
+            logger.error(
                 f"Divergência de linhas: arquivo={linhas_fonte}, tabela={linhas_tabela}"
             )
             sys.exit(1)
 
         if colunas_tabela != colunas_fonte:
             con.execute("ROLLBACK")
-            print(
+            logger.error(
                 f"Divergência de colunas: arquivo={colunas_fonte}, "
                 f"tabela={colunas_tabela}"
             )
@@ -47,10 +51,11 @@ def main():
     finally:
         con.close()
 
-    print(f"Tabela gravada: {TABELA}")
-    print(f"Linhas:  {linhas_tabela}")
-    print(f"Colunas: {colunas_tabela}")
+    logger.info(f"Tabela gravada: {TABELA}")
+    logger.info(f"Linhas:  {linhas_tabela}")
+    logger.info(f"Colunas: {colunas_tabela}")
 
 
 if __name__ == "__main__":
+    configurar()
     main()

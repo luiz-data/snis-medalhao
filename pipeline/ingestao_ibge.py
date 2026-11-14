@@ -9,10 +9,14 @@ As contagens esperadas são constantes nomeadas aqui (não lidas do MANIFEST.md 
 tempo de execução, por decisão do usuário); cada uma cita a seção da spec.
 """
 
+import logging
 import sys
 
 from pipeline.db import conectar
 from pipeline.ibge import DATA_EXTRACAO, arquivo_fonte
+from pipeline.log import configurar
+
+logger = logging.getLogger(__name__)
 
 # --- Contagens esperadas da extração 2026-11-08 (spec-ibge.md §9 e §12) ------
 # Fixas no código (não lidas do MANIFEST.md em runtime). Alimentam BB2/BB3.
@@ -47,7 +51,7 @@ def _bronze_fonte(con, fonte, tabela, arquivo, linhas_esp, colunas_esp):
     """Grava uma bronze IBGE e valida BB1–BB3. Sai com 1 em qualquer falha."""
     caminho = arquivo_fonte(fonte, arquivo)
     if not caminho.exists():  # BB1
-        print(f"[BLOQUEANTE] Arquivo ausente ({fonte}): {caminho}")
+        logger.error(f"[BLOQUEANTE] Arquivo ausente ({fonte}): {caminho}")
         sys.exit(1)
 
     origem = (
@@ -64,25 +68,25 @@ def _bronze_fonte(con, fonte, tabela, arquivo, linhas_esp, colunas_esp):
 
     if linhas != linhas_esp:  # BB2
         con.execute("ROLLBACK")
-        print(
+        logger.error(
             f"[BLOQUEANTE] {tabela}: linhas={linhas}, esperado {linhas_esp} "
             "(spec-ibge.md §9/§12). Verifique a extração em data/raw/ibge/."
         )
         sys.exit(1)
     if colunas != colunas_esp:  # BB3
         con.execute("ROLLBACK")
-        print(
+        logger.error(
             f"[BLOQUEANTE] {tabela}: colunas={colunas}, esperado {colunas_esp} "
             "(spec-ibge.md §9/§12)."
         )
         sys.exit(1)
 
     con.execute("COMMIT")
-    print(f"{tabela} · {linhas} linhas · {colunas} colunas")
+    logger.info(f"{tabela} · {linhas} linhas · {colunas} colunas")
 
 
 def main():
-    print(f"IBGE bronze (extração {DATA_EXTRACAO}):")
+    logger.info(f"IBGE bronze (extração {DATA_EXTRACAO}):")
     con = conectar()
     try:
         for fonte, (tabela, arq, linhas, colunas) in FONTES.items():
@@ -92,4 +96,5 @@ def main():
 
 
 if __name__ == "__main__":
+    configurar()
     main()
