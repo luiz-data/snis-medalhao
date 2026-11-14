@@ -10,6 +10,7 @@ Cobre:
 As expectativas numéricas ficam SÓ aqui; as listas/mapa vêm de pipeline.*.
 """
 
+import logging
 import shutil
 
 import duckdb
@@ -384,3 +385,116 @@ def test_cobertura_pop_alerta_nao_bloqueia(ibge_db, tmp_path):
     finally:
         con.close()
     assert not bloqueia
+
+
+# ===========================================================================
+# Regras puras extraídas da silver (sem banco) — IA9/IB9
+# ===========================================================================
+
+
+def test_msg_ia9_nao_dispara_dentro_do_teto():
+    """D17: até PIB_NEGATIVOS_MAX negativos é fato real, não bloqueia."""
+    negativos = [("2404507", "2012", "-19046")]
+    assert transf_ibge.msg_ia9(negativos) is None
+    assert transf_ibge.msg_ia9([]) is None
+
+
+def test_msg_ia9_dispara_acima_do_teto():
+    """D17: acima do teto, IA9 vira BLOQUEANTE (erro de leitura/sinal)."""
+    negativos = [(f"110000{i}", "2015", f"-{i}00") for i in range(1, 7)]
+    assert len(negativos) > transf_ibge.PIB_NEGATIVOS_MAX
+    msg = transf_ibge.msg_ia9(negativos)
+    assert msg is not None
+    assert msg.startswith("[BLOQUEANTE] IA9:")
+    assert "6 PIBs negativos" in msg
+
+
+def test_msg_ia9_respeita_teto_explicito():
+    """O teto é parâmetro: os mesmos 2 negativos bloqueiam com teto=1."""
+    negativos = [("1100015", "2015", "-10"), ("1100023", "2016", "-20")]
+    assert transf_ibge.msg_ia9(negativos, teto=2) is None
+    assert transf_ibge.msg_ia9(negativos, teto=1) is not None
+
+
+def test_msg_ib9_so_dispara_dentro_da_janela():
+    """D13: linha sem id só bloqueia se estiver dentro de 2010–2021."""
+    assert transf_ibge.msg_ib9(0) is None
+    msg = transf_ibge.msg_ib9(3)
+    assert msg is not None
+    assert msg.startswith("[BLOQUEANTE] IB9:")
+    assert f"{JANELA_INICIO}–{JANELA_FIM}" in msg
+
+
+# ===========================================================================
+# Caminho de falha da gravação: duckdb.Error → ROLLBACK + saída com erro
+# ===========================================================================
+
+
+def test_pib_gravar_falha_faz_rollback_e_sinaliza_erro(tmp_path, caplog):
+    """Erro no CREATE da silver: ROLLBACK (nada gravado) e sys.exit(1)."""
+    banco = tmp_path / "falha.duckdb"
+    con = duckdb.connect(str(banco))
+    con.execute("CREATE SCHEMA bronze")
+    # Bronze sem a coluna `valor`: o CREATE ... AS dentro da transação falha.
+    con.execute(
+        "CREATE TABLE bronze.ibge_pib_municipio (ano VARCHAR, id_municipio VARCHAR)"
+    )
+    con.execute("INSERT INTO bronze.ibge_pib_municipio VALUES ('2015', '3550308')")
+
+    with (
+        caplog.at_level(logging.ERROR, logger="pipeline.transformacao_ibge"),
+        pytest.raises(SystemExit) as saida,
+    ):
+        transf_ibge._pib_gravar(
+            con,
+            "bronze.ibge_pib_municipio",
+            "silver.ibge_pib_municipio",
+            transf_ibge._pib_lista_simbolos(),
+        )
+    assert saida.value.code == 1
+    assert "[BLOQUEANTE] Falha ao gravar" in caplog.text
+
+    # ROLLBACK efetivo: nem a silver nem o schema silver sobraram no banco.
+    con2 = duckdb.connect(str(banco), read_only=True)
+    try:
+        restou = con2.execute(
+            "SELECT count(*) FROM duckdb_tables() WHERE schema_name = 'silver'"
+        ).fetchone()[0]
+    finally:
+        con2.close()
+    assert restou == 0
+
+
+def test_pop_gravar_falha_faz_rollback_e_sinaliza_erro(tmp_path, caplog):
+    """Mesmo caminho de falha na POP: ROLLBACK e saída com código 1."""
+    banco = tmp_path / "falha_pop.duckdb"
+    con = duckdb.connect(str(banco))
+    con.execute("CREATE SCHEMA bronze")
+    # Sem a coluna `populacao`: o CREATE ... AS dentro da transação falha.
+    con.execute(
+        "CREATE TABLE bronze.ibge_populacao_municipio (ano VARCHAR, id_municipio VARCHAR)"
+    )
+    con.execute(
+        "INSERT INTO bronze.ibge_populacao_municipio VALUES ('2015', '3550308')"
+    )
+
+    with (
+        caplog.at_level(logging.ERROR, logger="pipeline.transformacao_ibge"),
+        pytest.raises(SystemExit) as saida,
+    ):
+        transf_ibge._pop_gravar(
+            con,
+            "silver.ibge_populacao_municipio",
+            transf_ibge._pop_filtro_validas("bronze.ibge_populacao_municipio"),
+        )
+    assert saida.value.code == 1
+    assert "[BLOQUEANTE] Falha ao gravar" in caplog.text
+
+    con2 = duckdb.connect(str(banco), read_only=True)
+    try:
+        restou = con2.execute(
+            "SELECT count(*) FROM duckdb_tables() WHERE schema_name = 'silver'"
+        ).fetchone()[0]
+    finally:
+        con2.close()
+    assert restou == 0
