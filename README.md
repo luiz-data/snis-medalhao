@@ -283,6 +283,99 @@ Código sob licença **MIT** (ver [`LICENSE`](LICENSE)). A licença cobre **o c�
 não os dados**: cada fonte de dados tem seus próprios termos (ver **Fontes e
 licenças**).
 
+## Erros encontrados e corrigidos durante o desenvolvimento
+
+O processo incluiu verificação ativa de cada número contra a fonte, o indicador
+publicado ou um teste — não a aceitação do primeiro resultado. Os itens abaixo são
+os casos em que a primeira versão estava errada e foi corrigida por evidência.
+
+**Denominador do esgoto no mart 7 (déficit nacional)** — O que estava errado: a
+ficha calculava a população sem esgoto só entre os municípios que informam esgoto,
+dando **57,9 milhões** em 2021. Como foi descoberto: o percentual não fechava com o
+IN056 (100 − 55,81 = 44,19% da população), e a diferença de ~35 milhões era
+exatamente a população do "branco" de esgoto (34,96 mi, 2.532 municípios). Correção:
+adotada a convenção oficial IN056 — denominador = informantes de água, branco de
+esgoto vale como "sem rede" — resultando em **92,88 milhões** (referência: D30 em
+[`docs/decisoes.md`](docs/decisoes.md)).
+
+**Perdas de água (IN049) por regra simplificada** — O que estava errado: a primeira
+versão do mart 3 excluía linhas com `produzido < consumido` como proxy de
+inconsistência, e o índice nacional saía em **~23%**. Como foi descoberto:
+comparação com o nível oficial conhecido (~40%) e constatação de que a regra
+excluía importadores legítimos (que usam AG018). Correção: fórmula completa do
+IN049 `(AG006+AG018−AG010−AG024)/(AG006+AG018−AG024)`, levando o nacional a
+**~36–39%**; a exclusão virou apenas salvaguarda, com impacto ≤ 0,15 pp
+(referência: D3 em [`docs/decisoes.md`](docs/decisoes.md)).
+
+**Fator de conversão de R$/m³ invertido** — O que estava errado: a redação da
+hipótese mandava **multiplicar** por 1.000 o quociente receita/volume. Como foi
+descoberto: teste de sanidade do resultado — multiplicar dava uma tarifa mediana de
+**R$ 4,6 milhões/m³**; a inspeção da fonte confirmou que o volume vem em 1.000
+m³/ano (São Paulo: `volume_agua_consumido` = 729.299,66 ≈ 163 L/hab·dia).
+Correção: `R$/m³ = Σreceita / (Σvolume × 1.000)`, ou seja **dividir** por 1.000,
+devolvendo a série nacional a **R$ 2,18 (2010) → 4,12/m³ (2021)** (referência: D22
+em [`docs/decisoes.md`](docs/decisoes.md)).
+
+**Consumo per capita pela fórmula ingênua** — O que estava errado: a primeira
+fórmula era `volume_agua_consumido / população do ano`, dando **183 L/hab·dia** no
+nacional de 2021. Como foi descoberto: conferência linha a linha contra a coluna
+publicada `indice_consumo_agua_per_capita` (2010–2021) — as variantes sem média de
+população reproduziam só 35–36% das linhas. Correção: IN022, descontando o volume
+exportado (AG019) e usando a média da população do ano e do ano anterior — bate em
+**99,95%** das linhas e dá **151,3 L/hab·dia** (referência ~152) (referência: D25
+em [`docs/decisoes.md`](docs/decisoes.md)).
+
+**Coluna errada na despesa unitária (IN003)** — O que estava errado: a primeira
+implementação usou `despesa_exploracao` (FN015, a DEX) por conflação de rótulo, em
+vez de `despesa_total_servico` (FN017, a DTS). Como foi descoberto: verificação dos
+dados — a DTS contém a DEX em 99,3–99,8% das linhas/ano (razão 1,30–1,40) e só a
+DTS reproduz a razão despesa/tarifa ≈ 0,94, comportamento conhecido do IN003/IN004.
+Correção: a despesa unitária passou a usar a DTS, indo de **R$ 2,06/m³ (2010) →
+3,87 (2021)** em vez de 1,51 → 2,83 (referência: D27, que corrige a D22, em
+[`docs/decisoes.md`](docs/decisoes.md)).
+
+**Universo comum aplicado ao esgoto no mart 6** — O que estava errado: a regra geral
+de "universo comum" (denominador = informantes do próprio indicador) estava sendo
+aplicada também à cobertura de esgoto por porte. Como foi descoberto: a faixa até
+5 mil habitantes dava **64,94%**, com perfil não monótono, e o teste do branco
+mostrou que 2.531 dos 2.532 municípios sem informação de esgoto têm rede, volume e
+ligações nulos — ou seja, "sem sistema", não "não informou". Correção: o esgoto
+passou a seguir a convenção IN056 (denominador = informantes de água), reproduzindo
+o oficial (**55,81%** em 2021 vs 55,8% publicado); o universo comum virou coluna
+auxiliar descritiva (referência: D29 em [`docs/decisoes.md`](docs/decisoes.md)).
+
+**Descritivos e nome da flag de investimento atípico** — O que estava errado: a D4
+descrevia o corte de R$ 1.000/hab como "~290 municípios sinalizados, p99,5, RN
+−36%", e a flag se chamava `prestador_regional_provavel`. Como foi descoberto:
+recálculo com a `populacao_total_ibge` materializada — R$ 1.000/hab é o p99,8 e dá
+**120 atípicos com RN −29,0%**; os descritivos eram do corte p99,5 real, **R$
+626,57** (267 casos, RN −36,4%). Correção: limiar mantido, descritivos corrigidos e
+flag renomeada para `investimento_atipico`, porque a silver não tem coluna de
+prestador — a atribuição a prestador regional era hipótese, não fato (referência:
+D28, que corrige a D4, em [`docs/decisoes.md`](docs/decisoes.md)).
+
+**Rótulo "oficial" em número não confirmado (perdas)** — O que estava errado: o
+valor de **37,42%** de perdas era tratado como número oficial, quando é o agregado
+pooled de 2010–2021, não o resultado de um ano. Como foi descoberto: busca pelas
+fontes primárias — o MDR cita 39,3%, o Ministério das Cidades cita 40,3% e os 40,1%
+são de 2020, sem tabela com ano-base inequívoco. Correção: o painel deixou de citar
+número publicado e passou a registrar apenas que a gold mede **36,86% em 2021** e
+que esse valor difere das divulgações (referência: §5 de
+[`docs/spec-dashboard.md`](docs/spec-dashboard.md), ligada à D34 em
+[`docs/decisoes.md`](docs/decisoes.md)).
+
+**Ranking do mart 4 com buracos** — O que estava errado: a fórmula literal da ficha
+usava `rank()`, que produz empates com buracos e máximo **4.429**, diferente do N de
+municípios ranqueados. Como foi descoberto: conflito com o próprio critério de
+aceite ("posição sem buracos de 1 a N"), confirmado na consulta: **4.431**
+ranqueados, com 1.375 empates (1.371 deles em 0 pp). Correção: `posicao` passou a
+`row_number()` com desempate pela população urbana de 2021, e o `rank()` foi
+preservado numa coluna separada `posicao_empate` (referência: D26 em
+[`docs/decisoes.md`](docs/decisoes.md)).
+
+O registro completo de **todas** as decisões — não só as correções — está em
+[`docs/decisoes.md`](docs/decisoes.md) (D1–D40).
+
 ## Limitações conhecidas
 
 Pendências que o **dashboard** precisa respeitar (inventário completo em
